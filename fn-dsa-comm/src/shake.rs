@@ -1,6 +1,10 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
+#![allow(clippy::assign_op_pattern)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::manual_rotate)]
+#![allow(clippy::needless_range_loop)]
 
 //! # SHAKE Implementation
 //!
@@ -9,11 +13,20 @@
 //! instances in parallel, with interleaved outputs; this PRNG benefits
 //! from AVX2 optimizations on x86 CPUs that support these opcodes.
 
+use core::fmt;
+
 use super::PRNG;
+use zeroize::Zeroize;
 
 // Keccak state (25*8 = 200 bytes).
 #[derive(Copy, Clone, Debug)]
 struct KeccakState([u64; 25]);
+
+impl Zeroize for KeccakState {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl KeccakState {
 
@@ -490,12 +503,18 @@ impl KeccakState {
     }
 }
 
-macro_rules! sha3_impl { ($typename:ident, $size:expr) => {
+macro_rules! sha3_impl { ($typename:ident, $size:expr_2021) => {
 
     #[doc = concat!("SHA3-", stringify!($size), " implementation.\n\n",
         "Instances are cloneable, which captures the current object state.")]
     #[derive(Copy, Clone, Debug)]
     pub struct $typename (SHA3Core<$size>);
+
+    impl Default for $typename {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
     impl $typename {
         /// Create a new SHA3 instance.
@@ -619,11 +638,48 @@ pub struct SHAKE<const SZ: usize> {
     flipped: bool,
 }
 
+impl<const SZ: usize> Zeroize for SHAKE<SZ> {
+    fn zeroize(&mut self) {
+        self.state.zeroize();
+        self.ptr.zeroize();
+        self.flipped.zeroize();
+    }
+}
+
 /// Type specialization for SHAKE128.
 pub type SHAKE128 = SHAKE<128>;
 
 /// Type specialization for SHAKE256.
 pub type SHAKE256 = SHAKE<256>;
+
+/// Error type for SHAKE state transitions.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ShakeError {
+    /// Input cannot be absorbed after the instance was flipped.
+    InjectAfterFlip,
+
+    /// The instance already entered output mode.
+    AlreadyFlipped,
+
+    /// Output cannot be extracted before the instance is flipped.
+    ExtractBeforeFlip,
+}
+
+impl fmt::Display for ShakeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InjectAfterFlip => {
+                write!(f, "cannot inject into SHAKE after switching to output mode")
+            }
+            Self::AlreadyFlipped => {
+                write!(f, "cannot flip SHAKE after it already entered output mode")
+            }
+            Self::ExtractBeforeFlip => {
+                write!(f, "cannot extract from SHAKE before switching to output mode")
+            }
+        }
+    }
+}
 
 impl<const SZ: usize> SHAKE<SZ> {
 
@@ -647,10 +703,12 @@ impl<const SZ: usize> SHAKE<SZ> {
 
     /// Inject some bytes into the engine.
     ///
-    /// This function can be called repeatedly. If the engine is in output
-    /// mode, then a panic is triggered.
-    pub fn inject(&mut self, src: &[u8]) {
-        assert!(!self.flipped);
+    /// This function can be called repeatedly. An error is returned if the
+    /// engine is already in output mode.
+    pub fn inject(&mut self, src: &[u8]) -> Result<(), ShakeError> {
+        if self.flipped {
+            return Err(ShakeError::InjectAfterFlip);
+        }
         let mut ptr = self.ptr;
         let mut i = 0;
         while i < src.len() {
@@ -666,27 +724,33 @@ impl<const SZ: usize> SHAKE<SZ> {
             }
         }
         self.ptr = ptr;
+        Ok(())
     }
 
     /// Flip the engine from input to output mode.
     ///
-    /// If the engine is already in output mode, then a panic is triggered.
-    pub fn flip(&mut self) {
-        assert!(!self.flipped);
+    /// An error is returned if the engine is already in output mode.
+    pub fn flip(&mut self) -> Result<(), ShakeError> {
+        if self.flipped {
+            return Err(ShakeError::AlreadyFlipped);
+        }
         let i = self.ptr;
         self.state.0[i >> 3] ^= 0x1Fu64 << ((i & 7) << 3);
         let i = Self::RATE - 1;
         self.state.0[i >> 3] ^= 0x80u64 << ((i & 7) << 3);
         self.ptr = Self::RATE;
         self.flipped = true;
+        Ok(())
     }
 
     /// Extract some bytes from the engine.
     ///
-    /// This function can be called repeatedly. If the engine is in input
-    /// mode, then a panic is triggered.
-    pub fn extract(&mut self, dst: &mut [u8]) {
-        assert!(self.flipped);
+    /// This function can be called repeatedly. An error is returned if the
+    /// engine is still in input mode.
+    pub fn extract(&mut self, dst: &mut [u8]) -> Result<(), ShakeError> {
+        if !self.flipped {
+            return Err(ShakeError::ExtractBeforeFlip);
+        }
         let mut ptr = self.ptr;
         let mut i = 0;
         while i < dst.len() {
@@ -702,11 +766,18 @@ impl<const SZ: usize> SHAKE<SZ> {
             }
         }
         self.ptr = ptr;
+        Ok(())
     }
 
     /// Reset this engine to the initial state (empty, input mode).
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+}
+
+impl<const SZ: usize> Default for SHAKE<SZ> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -722,10 +793,18 @@ pub struct SHAKE256_PRNG {
     ptr: usize,
 }
 
+impl Zeroize for SHAKE256_PRNG {
+    fn zeroize(&mut self) {
+        self.sh.zeroize();
+        self.buf.zeroize();
+        self.ptr.zeroize();
+    }
+}
+
 impl SHAKE256_PRNG {
 
     fn refill(&mut self) {
-        self.sh.extract(&mut self.buf);
+        self.sh.extract(&mut self.buf).unwrap();
         self.ptr = 0;
     }
 }
@@ -734,8 +813,8 @@ impl PRNG for SHAKE256_PRNG {
 
     fn new(seed: &[u8]) -> Self {
         let mut sh = SHAKE256::new();
-        sh.inject(seed);
-        sh.flip();
+        sh.inject(seed).unwrap();
+        sh.flip().unwrap();
         Self { sh, buf: [0u8; 136], ptr: 136 }
     }
 
@@ -791,6 +870,18 @@ pub struct SHAKE256x4 {
     #[cfg(all(not(feature = "no_avx2"),
         any(target_arch = "x86_64", target_arch = "x86")))]
     use_avx2: bool,
+}
+
+#[cfg(feature = "shake256x4")]
+impl Zeroize for SHAKE256x4 {
+    fn zeroize(&mut self) {
+        self.state.zeroize();
+        self.buf.zeroize();
+        self.ptr.zeroize();
+        #[cfg(all(not(feature = "no_avx2"),
+            any(target_arch = "x86_64", target_arch = "x86")))]
+        self.use_avx2.zeroize();
+    }
 }
 
 // Internal buffer of SHAKE256x4 must have length exactly 4*136 = 544
@@ -937,15 +1028,15 @@ mod tests {
 
     fn inner_shake<const SZ: usize>(kat: &[&str]) {
         for i in 0..(kat.len() >> 1) {
-            let src = hex::decode(&kat[2 * i]).unwrap();
-            let dst = hex::decode(&kat[2 * i + 1]).unwrap();
+            let src = hex::decode(kat[2 * i]).unwrap();
+            let dst = hex::decode(kat[2 * i + 1]).unwrap();
             let r = &mut [0u8; 512][..dst.len()];
 
             // Test 1: inject and extract in one go.
             let mut sh = SHAKE::<SZ>::new();
-            sh.inject(&src);
-            sh.flip();
-            sh.extract(r);
+            sh.inject(&src).unwrap();
+            sh.flip().unwrap();
+            sh.extract(r).unwrap();
             assert!(r == dst);
 
             // Test 2: inject and extract byte by byte.
@@ -954,12 +1045,12 @@ mod tests {
             }
             sh.reset();
             for j in 0..src.len() {
-                sh.inject(&[src[j]]);
+                sh.inject(&[src[j]]).unwrap();
             }
-            sh.flip();
+            sh.flip().unwrap();
             for j in 0..r.len() {
                 let mut tt = [0u8];
-                sh.extract(&mut tt[..]);
+                sh.extract(&mut tt[..]).unwrap();
                 r[j] = tt[0];
             }
             assert!(r == dst);
@@ -1010,8 +1101,8 @@ mod tests {
     fn shake256x4() {
         let mut seed_tab = [0u8; 300];
         let mut sh = SHAKE256::new();
-        sh.flip();
-        sh.extract(&mut seed_tab);
+        sh.flip().unwrap();
+        sh.extract(&mut seed_tab).unwrap();
         for i in 0..seed_tab.len() + 1 {
             let mut p = SHAKE256x4::new(&seed_tab[0..i]);
             let mut v1 = [0u8; 1280];
@@ -1023,11 +1114,11 @@ mod tests {
             let mut v2 = [0u8; 1280];
             for n in 0..4 {
                 sh.reset();
-                sh.inject(&seed_tab[0..i]);
-                sh.inject(&[n as u8]);
+                sh.inject(&seed_tab[0..i]).unwrap();
+                sh.inject(&[n as u8]).unwrap();
                 let mut tmp = [0u8; 320];
-                sh.flip();
-                sh.extract(&mut tmp);
+                sh.flip().unwrap();
+                sh.extract(&mut tmp).unwrap();
                 for j in 0..40 {
                     for k in 0..8 {
                         v2[32 * j + 8 * n + k] = tmp[8 * j + k];
@@ -1036,6 +1127,16 @@ mod tests {
             }
             assert!(v1 == v2);
         }
+    }
+
+    #[test]
+    fn shake_rejects_invalid_state_transitions() {
+        let mut sh = SHAKE256::new();
+        let mut out = [0u8; 1];
+        assert_eq!(sh.extract(&mut out), Err(ShakeError::ExtractBeforeFlip));
+        sh.flip().unwrap();
+        assert_eq!(sh.inject(b"x"), Err(ShakeError::InjectAfterFlip));
+        assert_eq!(sh.flip(), Err(ShakeError::AlreadyFlipped));
     }
 
     // SHA3 test vectors from:
@@ -2494,7 +2595,7 @@ mod tests {
                 32 => { sha3_256(&m, &d); },
                 48 => { sha3_384(&m, &d); },
                 64 => { sha3_512(&m, &d); },
-                _ => { assert!(false); },
+                _ => unreachable!(),
             }
         }
     }

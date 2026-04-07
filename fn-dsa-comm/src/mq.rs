@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::needless_range_loop)]
 
 //! # Computations modulo q = 12289
 //!
@@ -606,11 +608,11 @@ mod tests {
         let mut sh = crate::shake::SHAKE256::new();
         for i in 0..n {
             sh.reset();
-            sh.inject(&seed.to_le_bytes());
-            sh.inject(&(i as u16).to_le_bytes());
-            sh.flip();
+            sh.inject(&seed.to_le_bytes()).unwrap();
+            sh.inject(&(i as u16).to_le_bytes()).unwrap();
+            sh.flip().unwrap();
             let mut hv = [0u8; 16];
-            sh.extract(&mut hv);
+            sh.extract(&mut hv).unwrap();
             t1[i] = (u64::from_le_bytes(*<&[u8; 8]>::try_from(&hv[0..8]).unwrap()) % 12289) as u16;
             t2[i] = (u64::from_le_bytes(*<&[u8; 8]>::try_from(&hv[8..16]).unwrap()) % 12289) as u16;
         }

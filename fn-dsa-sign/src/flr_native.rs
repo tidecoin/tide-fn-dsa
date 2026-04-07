@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(clippy::excessive_precision)]
+#![allow(clippy::upper_case_acronyms)]
 
 // ========================================================================
 // Floating-point operations: native

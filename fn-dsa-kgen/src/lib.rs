@@ -1,6 +1,20 @@
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(clippy::double_comparisons)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::needless_late_init)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::never_loop)]
+#![allow(clippy::op_ref)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::upper_case_acronyms)]
 
 //! # FN-DSA key pair generation
 //!
@@ -29,9 +43,8 @@
 //!  - `KeyPairGenerator1024`: degree 1024 only
 //!  - `KeyPairGeneratorWeak`: degrees 4 to 256 only
 //!
-//! Given `logn`, the `sign_key_size()` and `vrfy_key_size()` constant
-//! functions yield the sizes of the signing and verifying keys (in
-//! bytes).
+//! Given `logn`, the `sign_key_size()` and `vrfy_key_size()` functions
+//! yield the sizes of the signing and verifying keys (in bytes).
 //!
 //! ## WARNING
 //!
@@ -46,21 +59,47 @@
 //!
 //! ## Example usage
 //!
-//! ```ignore
-//! use rand_core::OsRng;
+//! ```no_run
 //! use fn_dsa_kgen::{
-//!     sign_key_size, vrfy_key_size, FN_DSA_LOGN_512,
+//!     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, FN_DSA_LOGN_512,
 //!     KeyPairGenerator, KeyPairGeneratorStandard,
+//!     CryptoRng, RngCore, RngError,
 //! };
+//! #
+//! # struct DemoRng(u64);
+//! # impl CryptoRng for DemoRng {}
+//! # impl RngCore for DemoRng {
+//! #     fn next_u32(&mut self) -> u32 {
+//! #         let x = self.0 as u32;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn next_u64(&mut self) -> u64 {
+//! #         let x = self.0;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn fill_bytes(&mut self, dest: &mut [u8]) {
+//! #         for chunk in dest.chunks_mut(8) {
+//! #             let bytes = self.next_u64().to_le_bytes();
+//! #             let len = chunk.len();
+//! #             chunk.copy_from_slice(&bytes[..len]);
+//! #         }
+//! #     }
+//! #     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+//! #         self.fill_bytes(dest);
+//! #         Ok(())
+//! #     }
+//! # }
 //! 
+//! let mut rng = DemoRng(1);
 //! let mut kg = KeyPairGeneratorStandard::default();
-//! let mut sign_key = [0u8; sign_key_size(FN_DSA_LOGN_512)];
-//! let mut vrfy_key = [0u8; vrfy_key_size(FN_DSA_LOGN_512)];
-//! kg.keygen(FN_DSA_LOGN_512, &mut OsRng, &mut sign_key, &mut vrfy_key);
+//! let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+//! let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+//! kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sign_key, &mut vrfy_key)
+//!     .unwrap();
 //! ```
 //!
-//! [`OsRng`]: https://docs.rs/rand_core/0.6.4/rand_core/struct.OsRng.html
-
 mod fxp;
 mod gauss;
 mod mp31;
@@ -85,17 +124,175 @@ mod vect_avx2;
     any(target_arch = "x86_64", target_arch = "x86")))]
 mod zint31_avx2;
 
-use fn_dsa_comm::{codec, mq, shake};
-#[cfg(not(feature = "shake256x4"))]
-use fn_dsa_comm::PRNG;
+use fn_dsa_comm::{codec, mq, shake, PRNG};
+use core::fmt;
+use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Re-export useful types, constants and functions.
 pub use fn_dsa_comm::{
     sign_key_size, vrfy_key_size,
     FN_DSA_LOGN_512, FN_DSA_LOGN_1024,
+    SIGN_KEY_SIZE_512, SIGN_KEY_SIZE_1024,
+    VRFY_KEY_SIZE_512, VRFY_KEY_SIZE_1024,
+    LogNError,
     CryptoRng, RngCore, RngError,
 };
+
+/// Seed length for deterministic Falcon key generation.
+///
+/// This matches the seed width used by PQClean/Tidecoin deterministic
+/// Falcon key generation.
+pub const FALCON_KEYGEN_SEED_SIZE: usize = 48;
+
+/// Stream-key length for Tidecoin PQHD deterministic Falcon key generation.
+pub const PQHD_KEYGEN_STREAM_SIZE: usize = 64;
+
+/// Maximum number of deterministic stream-key retry attempts.
+pub const PQHD_MAX_DETERMINISTIC_ATTEMPTS: u32 = 1024;
+
+const PQHD_RNG_PREFIX: &[u8] = b"Tidecoin PQHD rng v1";
+
+/// Error type for key pair generation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum KeyGenError {
+    /// The requested degree is not supported by this generator.
+    UnsupportedLogN { logn: u32 },
+
+    /// The destination buffer for the signing key has the wrong size.
+    InvalidSigningKeyBufferLen { expected: usize, actual: usize },
+
+    /// The destination buffer for the verifying key has the wrong size.
+    InvalidVerifyingKeyBufferLen { expected: usize, actual: usize },
+}
+
+impl fmt::Display for KeyGenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::UnsupportedLogN { logn } => {
+                write!(f, "unsupported degree parameter logn={logn}")
+            }
+            Self::InvalidSigningKeyBufferLen { expected, actual } => write!(
+                f,
+                "invalid signing key buffer length: expected {expected} bytes, got {actual}"
+            ),
+            Self::InvalidVerifyingKeyBufferLen { expected, actual } => write!(
+                f,
+                "invalid verifying key buffer length: expected {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+/// Error type for deterministic Falcon key pair generation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeterministicKeyGenError {
+    /// Generic key-generation validation failure.
+    Validation(KeyGenError),
+
+    /// The provided Falcon seed length is invalid.
+    InvalidSeedLen { expected: usize, actual: usize },
+
+    /// The provided PQHD stream-key length is invalid.
+    InvalidStreamKeyLen { expected: usize, actual: usize },
+
+    /// The provided Falcon seed was rejected by deterministic key generation.
+    RejectedSeed,
+
+    /// Deterministic stream-key retries were exhausted.
+    ExhaustedAttempts { attempts: u32 },
+}
+
+impl From<KeyGenError> for DeterministicKeyGenError {
+    fn from(value: KeyGenError) -> Self {
+        Self::Validation(value)
+    }
+}
+
+impl fmt::Display for DeterministicKeyGenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Validation(err) => err.fmt(f),
+            Self::InvalidSeedLen { expected, actual } => write!(
+                f,
+                "invalid Falcon keygen seed length: expected {expected} bytes, got {actual}"
+            ),
+            Self::InvalidStreamKeyLen { expected, actual } => write!(
+                f,
+                "invalid PQHD stream-key length: expected {expected} bytes, got {actual}"
+            ),
+            Self::RejectedSeed => {
+                write!(f, "deterministic Falcon key generation rejected the provided seed")
+            }
+            Self::ExhaustedAttempts { attempts } => write!(
+                f,
+                "deterministic Falcon key generation exhausted {attempts} stream-key attempts"
+            ),
+        }
+    }
+}
+
+fn validate_deterministic_falcon_io(
+    logn: u32,
+    sign_key: &[u8],
+    vrfy_key: &[u8],
+) -> Result<(), KeyGenError> {
+    if !(FN_DSA_LOGN_512..=FN_DSA_LOGN_1024).contains(&logn) {
+        return Err(KeyGenError::UnsupportedLogN { logn });
+    }
+    let expected_sign_key_len = sign_key_size(logn).unwrap();
+    if sign_key.len() != expected_sign_key_len {
+        return Err(KeyGenError::InvalidSigningKeyBufferLen {
+            expected: expected_sign_key_len,
+            actual: sign_key.len(),
+        });
+    }
+    let expected_vrfy_key_len = vrfy_key_size(logn).unwrap();
+    if vrfy_key.len() != expected_vrfy_key_len {
+        return Err(KeyGenError::InvalidVerifyingKeyBufferLen {
+            expected: expected_vrfy_key_len,
+            actual: vrfy_key.len(),
+        });
+    }
+    Ok(())
+}
+
+fn pqhd_stream_block(
+    stream_key: &[u8; PQHD_KEYGEN_STREAM_SIZE],
+    ctr: u32,
+) -> [u8; PQHD_KEYGEN_STREAM_SIZE] {
+    let mut block = [0u8; PQHD_KEYGEN_STREAM_SIZE];
+    let mut hmac_key = [0u8; 128];
+    hmac_key[..stream_key.len()].copy_from_slice(stream_key);
+
+    let mut ipad = [0x36u8; 128];
+    let mut opad = [0x5Cu8; 128];
+    for i in 0..hmac_key.len() {
+        ipad[i] ^= hmac_key[i];
+        opad[i] ^= hmac_key[i];
+    }
+
+    let mut inner = Sha512::new();
+    inner.update(ipad);
+    inner.update(PQHD_RNG_PREFIX);
+    inner.update(ctr.to_be_bytes());
+    let mut inner_hash = [0u8; 64];
+    inner_hash.copy_from_slice(&inner.finalize());
+
+    let mut outer = Sha512::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    let mut outer_hash = [0u8; 64];
+    outer_hash.copy_from_slice(&outer.finalize());
+    block.copy_from_slice(&outer_hash);
+
+    outer_hash.zeroize();
+    inner_hash.zeroize();
+    opad.zeroize();
+    ipad.zeroize();
+    hmac_key.zeroize();
+    block
+}
 
 /// Key pair generator and temporary buffers.
 ///
@@ -108,21 +305,22 @@ pub use fn_dsa_comm::{
 /// the object is released).
 pub trait KeyPairGenerator: Default {
 
-    /// Generate a new key pair.
+    /// Check whether this instance supports the provided degree.
     ///
-    /// The random source `rng` MUST be cryptographically secure. The
-    /// degree (`logn`) must be supported by the instance; a panic is
-    /// triggered otherwise. The new signing and verifying keys are
-    /// written into `sign_key` and `vrfy_key`, respectively; these
-    /// destination slices MUST have the exact size for their respective
-    /// contents (see the `sign_key_size()` and `vrfy_key_size()`
-    /// functions).
+    /// Implementations that only support a subset of degrees should
+    /// override this method consistently with [`keygen()`].
+    fn supports_logn(&self, logn: u32) -> bool {
+        (2..=10).contains(&logn)
+    }
+
+    /// Generate a new key pair.
     fn keygen<T: CryptoRng + RngCore>(&mut self,
-        logn: u32, rng: &mut T, sign_key: &mut [u8], vrfy_key: &mut [u8]);
+        logn: u32, rng: &mut T, sign_key: &mut [u8], vrfy_key: &mut [u8])
+        -> Result<(), KeyGenError>;
 }
 
 macro_rules! kgen_impl {
-    ($typename:ident, $logn_min:expr, $logn_max:expr) =>
+    ($typename:ident, $logn_min:expr_2021, $logn_max:expr_2021) =>
 {
     #[doc = concat!("Key pair generator for degrees (`logn`) ",
         stringify!($logn_min), " to ", stringify!($logn_max), " only.")]
@@ -136,14 +334,35 @@ macro_rules! kgen_impl {
 
     impl KeyPairGenerator for $typename {
 
+        fn supports_logn(&self, logn: u32) -> bool {
+            logn >= ($logn_min) && logn <= ($logn_max)
+        }
+
         fn keygen<T: CryptoRng + RngCore>(&mut self,
             logn: u32, rng: &mut T, sign_key: &mut [u8], vrfy_key: &mut [u8])
+            -> Result<(), KeyGenError>
         {
-            // Enforce minimum and maximum degree.
-            assert!(logn >= ($logn_min) && logn <= ($logn_max));
+            if !self.supports_logn(logn) {
+                return Err(KeyGenError::UnsupportedLogN { logn });
+            }
+            let expected_sign_key_len = sign_key_size(logn).unwrap();
+            if sign_key.len() != expected_sign_key_len {
+                return Err(KeyGenError::InvalidSigningKeyBufferLen {
+                    expected: expected_sign_key_len,
+                    actual: sign_key.len(),
+                });
+            }
+            let expected_vrfy_key_len = vrfy_key_size(logn).unwrap();
+            if vrfy_key.len() != expected_vrfy_key_len {
+                return Err(KeyGenError::InvalidVerifyingKeyBufferLen {
+                    expected: expected_vrfy_key_len,
+                    actual: vrfy_key.len(),
+                });
+            }
             keygen_inner(logn, rng, sign_key, vrfy_key,
                 &mut self.tmp_i8, &mut self.tmp_u16,
                 &mut self.tmp_u32, &mut self.tmp_fxr);
+            Ok(())
         }
     }
 
@@ -181,6 +400,173 @@ kgen_impl!(KeyPairGenerator1024, 10, 10);
 // and research purposes; they are not standardized.
 kgen_impl!(KeyPairGeneratorWeak, 2, 8);
 
+macro_rules! deterministic_falcon_impl {
+    ($typename:ident) => {
+        impl $typename {
+            /// Generate a deterministic Falcon key pair from a 48-byte seed.
+            ///
+            /// This API is intended for compatibility-sensitive deterministic
+            /// key derivation. It always uses the scalar SHAKE256 seed
+            /// expansion path, even if the `shake256x4` feature is enabled,
+            /// so that a given seed maps to the same Falcon key pair as in
+            /// PQClean/Tidecoin deterministic key generation.
+            pub fn keygen_from_seed(
+                &mut self,
+                logn: u32,
+                seed: &[u8],
+                sign_key: &mut [u8],
+                vrfy_key: &mut [u8],
+            ) -> Result<(), DeterministicKeyGenError> {
+                validate_deterministic_falcon_io(logn, sign_key, vrfy_key)?;
+                if seed.len() != FALCON_KEYGEN_SEED_SIZE {
+                    return Err(DeterministicKeyGenError::InvalidSeedLen {
+                        expected: FALCON_KEYGEN_SEED_SIZE,
+                        actual: seed.len(),
+                    });
+                }
+                let result = deterministic_keygen_inner(
+                    logn,
+                    seed,
+                    sign_key,
+                    vrfy_key,
+                    &mut self.tmp_i8,
+                    &mut self.tmp_u16,
+                    &mut self.tmp_u32,
+                    &mut self.tmp_fxr,
+                );
+                self.zeroize();
+                result
+            }
+
+            /// Generate a deterministic Falcon key pair from a 64-byte PQHD
+            /// stream key using the Tidecoin node retry schedule.
+            ///
+            /// This API derives 48-byte Falcon seeds from the provided
+            /// 64-byte stream key with the same HMAC-SHA512 stream-block KDF
+            /// and counter-based retry schedule as the Tidecoin node.
+            /// As with [`Self::keygen_from_seed()`], the scalar SHAKE256 seed
+            /// expansion path is always used so that outputs do not depend on
+            /// the `shake256x4` feature.
+            pub fn keygen_from_stream_key(
+                &mut self,
+                logn: u32,
+                stream_key: &[u8],
+                sign_key: &mut [u8],
+                vrfy_key: &mut [u8],
+            ) -> Result<(), DeterministicKeyGenError> {
+                validate_deterministic_falcon_io(logn, sign_key, vrfy_key)?;
+                let stream_key: &[u8; PQHD_KEYGEN_STREAM_SIZE] = stream_key.try_into().map_err(|_| {
+                    DeterministicKeyGenError::InvalidStreamKeyLen {
+                        expected: PQHD_KEYGEN_STREAM_SIZE,
+                        actual: stream_key.len(),
+                    }
+                })?;
+                let result = 'attempts: {
+                    for ctr in 0..PQHD_MAX_DETERMINISTIC_ATTEMPTS {
+                    let mut block = pqhd_stream_block(stream_key, ctr);
+                        let result = deterministic_keygen_inner(
+                        logn,
+                        &block[..FALCON_KEYGEN_SEED_SIZE],
+                        sign_key,
+                        vrfy_key,
+                        &mut self.tmp_i8,
+                        &mut self.tmp_u16,
+                        &mut self.tmp_u32,
+                        &mut self.tmp_fxr,
+                    );
+                    block.zeroize();
+                        match result {
+                            Ok(()) => break 'attempts Ok(()),
+                            Err(DeterministicKeyGenError::RejectedSeed) => continue,
+                            Err(err) => break 'attempts Err(err),
+                        }
+                    }
+                    Err(DeterministicKeyGenError::ExhaustedAttempts {
+                        attempts: PQHD_MAX_DETERMINISTIC_ATTEMPTS,
+                    })
+                };
+                self.zeroize();
+                result
+            }
+        }
+    };
+}
+
+deterministic_falcon_impl!(KeyPairGeneratorStandard);
+deterministic_falcon_impl!(KeyPairGenerator512);
+deterministic_falcon_impl!(KeyPairGenerator1024);
+
+fn encode_keypair(
+    logn: u32,
+    f: &[i8],
+    g: &[i8],
+    F: &[i8],
+    h: &[u16],
+    sign_key: &mut [u8],
+    vrfy_key: &mut [u8],
+) -> Result<(), DeterministicKeyGenError> {
+    sign_key[0] = 0x50 + (logn as u8);
+    let nbits_fg = match logn {
+        2..=5 => 8,
+        6..=7 => 7,
+        8..=9 => 6,
+        _ => 5,
+    };
+    let j = 1
+        + codec::trim_i8_encode(f, nbits_fg, &mut sign_key[1..])
+            .map_err(|_| DeterministicKeyGenError::RejectedSeed)?;
+    let j = j
+        + codec::trim_i8_encode(g, nbits_fg, &mut sign_key[j..])
+            .map_err(|_| DeterministicKeyGenError::RejectedSeed)?;
+    let j = j
+        + codec::trim_i8_encode(F, 8, &mut sign_key[j..])
+            .map_err(|_| DeterministicKeyGenError::RejectedSeed)?;
+    debug_assert!(j == sign_key.len());
+
+    vrfy_key[0] = 0x00 + (logn as u8);
+    let j = 1
+        + codec::modq_encode(h, &mut vrfy_key[1..])
+            .map_err(|_| DeterministicKeyGenError::RejectedSeed)?;
+    debug_assert!(j == vrfy_key.len());
+    Ok(())
+}
+
+fn deterministic_keygen_inner(
+    logn: u32,
+    seed: &[u8],
+    sign_key: &mut [u8],
+    vrfy_key: &mut [u8],
+    tmp_i8: &mut [i8],
+    tmp_u16: &mut [u16],
+    tmp_u32: &mut [u32],
+    tmp_fxr: &mut [fxp::FXR],
+) -> Result<(), DeterministicKeyGenError> {
+    assert!(2 <= logn && logn <= 10);
+    assert!(sign_key.len() == sign_key_size(logn).unwrap());
+    assert!(vrfy_key.len() == vrfy_key_size(logn).unwrap());
+
+    let n = 1usize << logn;
+    let (f, tmp_i8) = tmp_i8.split_at_mut(n);
+    let (g, tmp_i8) = tmp_i8.split_at_mut(n);
+    let (F, tmp_i8) = tmp_i8.split_at_mut(n);
+    let (G, _) = tmp_i8.split_at_mut(n);
+    let (h, t16) = tmp_u16.split_at_mut(n);
+
+    #[cfg(all(not(feature = "no_avx2"),
+        any(target_arch = "x86_64", target_arch = "x86")))]
+    if fn_dsa_comm::has_avx2() {
+        unsafe {
+            keygen_from_seed_avx2_scalar_prng(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+            fn_dsa_comm::mq_avx2::mqpoly_div_small(logn, f, g, h, t16);
+        }
+        return encode_keypair(logn, f, g, F, h, sign_key, vrfy_key);
+    }
+
+    keygen_from_seed_scalar_prng(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+    mq::mqpoly_div_small(logn, f, g, h, t16);
+    encode_keypair(logn, f, g, F, h, sign_key, vrfy_key)
+}
+
 // Generate a new key pair, using the provided random generator as
 // source for the initial entropy. The degree is n = 2^logn, with
 // 2 <= logn <= 10 (normal keys use logn = 9 or 10, for degrees 512
@@ -198,64 +584,42 @@ fn keygen_inner<T: CryptoRng + RngCore>(logn: u32, rng: &mut T,
     tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
 {
     assert!(2 <= logn && logn <= 10);
-    assert!(sign_key.len() == sign_key_size(logn));
-    assert!(vrfy_key.len() == vrfy_key_size(logn));
+    assert!(sign_key.len() == sign_key_size(logn).unwrap());
+    assert!(vrfy_key.len() == vrfy_key_size(logn).unwrap());
 
     let n = 1usize << logn;
-
-    // Get a new seed. Everything is generated deterministically from
-    // the seed.
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
-
-    // Make f, g, F and G.
-    // Keygen is slow enough that the runtime cost for AVX2 detection
-    // is negligible. If we are on x86 and AVX2 is available then we
-    // can use the specialized implementation.
     let (f, tmp_i8) = tmp_i8.split_at_mut(n);
     let (g, tmp_i8) = tmp_i8.split_at_mut(n);
     let (F, tmp_i8) = tmp_i8.split_at_mut(n);
     let (G, _) = tmp_i8.split_at_mut(n);
     let (h, t16) = tmp_u16.split_at_mut(n);
 
-    loop {
-        #[cfg(all(not(feature = "no_avx2"),
-            any(target_arch = "x86_64", target_arch = "x86")))]
-        if fn_dsa_comm::has_avx2() {
-            unsafe {
-                keygen_from_seed_avx2(
-                    logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
-                fn_dsa_comm::mq_avx2::mqpoly_div_small(logn, f, g, h, t16);
-            }
-            break;
+    #[cfg(all(not(feature = "no_avx2"),
+        any(target_arch = "x86_64", target_arch = "x86")))]
+    if fn_dsa_comm::has_avx2() {
+        unsafe {
+            keygen_from_seed_avx2(logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+            fn_dsa_comm::mq_avx2::mqpoly_div_small(logn, f, g, h, t16);
         }
-
-        keygen_from_seed(logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
-        mq::mqpoly_div_small(logn, f, g, h, t16);
-        break;
+        seed.zeroize();
+        encode_keypair(logn, f, g, F, h, sign_key, vrfy_key)
+            .expect("random key generation produced an encodable key");
+        return;
     }
 
-    // Encode the signing key (f, g and F, in that order).
-    sign_key[0] = 0x50 + (logn as u8);
-    let nbits_fg = match logn {
-        2..=5 => 8,
-        6..=7 => 7,
-        8..=9 => 6,
-        _ => 5,
-    };
-    let j = 1 + codec::trim_i8_encode(f, nbits_fg, &mut sign_key[1..]);
-    let j = j + codec::trim_i8_encode(g, nbits_fg, &mut sign_key[j..]);
-    let j = j + codec::trim_i8_encode(F, 8, &mut sign_key[j..]);
-    assert!(j == sign_key.len());
-
-    // Encode the verifying key.
-    vrfy_key[0] = 0x00 + (logn as u8);
-    let j = 1 + codec::modq_encode(h, &mut vrfy_key[1..]);
-    assert!(j == vrfy_key.len());
+    keygen_from_seed(logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+    mq::mqpoly_div_small(logn, f, g, h, t16);
+    seed.zeroize();
+    encode_keypair(logn, f, g, F, h, sign_key, vrfy_key)
+        .expect("random key generation produced an encodable key");
 }
 
 // Internal keygen function:
 //  - processing is deterministic from the provided seed;
+//  - the scalar SHAKE256 PRNG is used regardless of crate features so that
+//    outputs match PQClean/Tidecoin deterministic Falcon key generation;
 //  - the f, g, F and G polynomials are not encoded, but provided in
 //    raw format (arrays of signed integers);
 //  - the public key h = g/f is not computed (but the function checks
@@ -264,11 +628,45 @@ fn keygen_inner<T: CryptoRng + RngCore>(logn: u32, rng: &mut T,
 //   tmp_u16: n
 //   tmp_u32: 6*n
 //   tmp_fxr: 2.5*n
+fn keygen_from_seed_scalar_prng(logn: u32, seed: &[u8],
+    f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
+    tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
+{
+    let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
+    keygen_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+    rng.zeroize();
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn keygen_from_seed(logn: u32, seed: &[u8],
     f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
     tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
 {
-    // Check the parameters.
+    #[cfg(feature = "shake256x4")]
+    {
+        let mut rng = shake::SHAKE256x4::new(seed);
+        keygen_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+        rng.zeroize();
+        return;
+    }
+
+    #[cfg(not(feature = "shake256x4"))]
+    {
+        keygen_from_seed_scalar_prng(logn, seed, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+    }
+}
+
+fn keygen_with_prng<P: PRNG>(
+    logn: u32,
+    rng: &mut P,
+    f: &mut [i8],
+    g: &mut [i8],
+    F: &mut [i8],
+    G: &mut [i8],
+    tmp_u16: &mut [u16],
+    tmp_u32: &mut [u32],
+    tmp_fxr: &mut [fxp::FXR],
+) {
     assert!(2 <= logn && logn <= 10);
     let n = 1usize << logn;
     assert!(f.len() == n);
@@ -276,19 +674,10 @@ fn keygen_from_seed(logn: u32, seed: &[u8],
     assert!(F.len() == n);
     assert!(G.len() == n);
 
-    #[cfg(feature = "shake256x4")]
-    let mut rng = shake::SHAKE256x4::new(seed);
-
-    #[cfg(not(feature = "shake256x4"))]
-    let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
-
     loop {
-        // Generate f and g with the right parity.
-        gauss::sample_f(logn, &mut rng, f);
-        gauss::sample_f(logn, &mut rng, g);
+        gauss::sample_f(logn, rng, f);
+        gauss::sample_f(logn, rng, g);
 
-        // Ensure that ||(g, -f)|| < 1.17*sqrt(q). We compute the
-        // squared norm; (1.17*sqrt(q))^2 = 16822.4121
         let mut sn = 0;
         for i in 0..n {
             let xf = f[i] as i32;
@@ -298,20 +687,13 @@ fn keygen_from_seed(logn: u32, seed: &[u8],
         if sn >= 16823 {
             continue;
         }
-
-        // f must be invertible modulo X^n+1 modulo q.
         if !mq::mqpoly_small_is_invertible(logn, &*f, tmp_u16) {
             continue;
         }
-
-        // (f,g) must have an acceptable orthogonalized norm.
         if !ntru::check_ortho_norm(logn, &*f, &*g, tmp_fxr) {
             continue;
         }
-
-        // Solve the NTRU equation.
         if ntru::solve_NTRU(logn, &*f, &*g, F, G, tmp_u32, tmp_fxr) {
-            // We found a solution.
             break;
         }
     }
@@ -321,7 +703,7 @@ fn keygen_from_seed(logn: u32, seed: &[u8],
 #[cfg(all(not(feature = "no_avx2"),
     any(target_arch = "x86_64", target_arch = "x86")))]
 #[target_feature(enable = "avx2")]
-unsafe fn keygen_from_seed_avx2(logn: u32, seed: &[u8],
+unsafe fn keygen_from_seed_avx2_with_prng<P: PRNG>(logn: u32, rng: &mut P,
     f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
     tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
 {
@@ -341,17 +723,10 @@ unsafe fn keygen_from_seed_avx2(logn: u32, seed: &[u8],
     assert!(F.len() == n);
     assert!(G.len() == n);
 
-
-    #[cfg(feature = "shake256x4")]
-    let mut rng = shake::SHAKE256x4::new(seed);
-
-    #[cfg(not(feature = "shake256x4"))]
-    let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
-
     loop {
         // Generate f and g with the right parity.
-        gauss::sample_f(logn, &mut rng, f);
-        gauss::sample_f(logn, &mut rng, g);
+        gauss::sample_f(logn, rng, f);
+        gauss::sample_f(logn, rng, g);
 
         // Ensure that ||(g, -f)|| < 1.17*sqrt(q). We compute the
         // squared norm; (1.17*sqrt(q))^2 = 16822.4121
@@ -422,6 +797,40 @@ unsafe fn keygen_from_seed_avx2(logn: u32, seed: &[u8],
             break;
         }
     }
+}
+
+#[cfg(all(not(feature = "no_avx2"),
+    any(target_arch = "x86_64", target_arch = "x86")))]
+#[target_feature(enable = "avx2")]
+#[cfg_attr(not(test), allow(dead_code))]
+unsafe fn keygen_from_seed_avx2(logn: u32, seed: &[u8],
+    f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
+    tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
+{
+    #[cfg(feature = "shake256x4")]
+    {
+        let mut rng = shake::SHAKE256x4::new(seed);
+        keygen_from_seed_avx2_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+        return;
+    }
+
+    #[cfg(not(feature = "shake256x4"))]
+    {
+        let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
+        keygen_from_seed_avx2_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+    }
+}
+
+#[cfg(all(not(feature = "no_avx2"),
+    any(target_arch = "x86_64", target_arch = "x86")))]
+#[target_feature(enable = "avx2")]
+unsafe fn keygen_from_seed_avx2_scalar_prng(logn: u32, seed: &[u8],
+    f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
+    tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
+{
+    let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
+    keygen_from_seed_avx2_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+    rng.zeroize();
 }
 
 #[cfg(test)]
@@ -1192,5 +1601,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn deterministic_stream_block_matches_node_kdf() {
+        let stream_key = [0u8; PQHD_KEYGEN_STREAM_SIZE];
+        let block = pqhd_stream_block(&stream_key, 0);
+        assert_eq!(
+            hex::encode(block),
+            "ab63e957d49009119c9f73adc7d0a9e0be463dbbcc9652ebe907efbeb2b13e794d13a224c67fc64351058bc9250760ad3b6fc111d359a4c83fbd927bce521b3e"
+        );
+    }
+
+    #[test]
+    fn deterministic_keygen_from_stream_matches_seed_attempt_zero() {
+        let mut kg_seed = KeyPairGeneratorStandard::default();
+        let mut kg_stream = KeyPairGeneratorStandard::default();
+        let mut sk_seed = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_seed = [0u8; VRFY_KEY_SIZE_512];
+        let mut sk_stream = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_stream = [0u8; VRFY_KEY_SIZE_512];
+        let stream_key = [0u8; PQHD_KEYGEN_STREAM_SIZE];
+        let block = pqhd_stream_block(&stream_key, 0);
+
+        kg_seed
+            .keygen_from_seed(
+                FN_DSA_LOGN_512,
+                &block[..FALCON_KEYGEN_SEED_SIZE],
+                &mut sk_seed,
+                &mut vk_seed,
+            )
+            .unwrap();
+        kg_stream
+            .keygen_from_stream_key(
+                FN_DSA_LOGN_512,
+                &stream_key,
+                &mut sk_stream,
+                &mut vk_stream,
+            )
+            .unwrap();
+
+        assert_eq!(sk_seed, sk_stream);
+        assert_eq!(vk_seed, vk_stream);
+    }
+
+    #[test]
+    fn deterministic_keygen_reports_validation_errors() {
+        let mut kg = KeyPairGeneratorStandard::default();
+        let mut sk = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk = [0u8; VRFY_KEY_SIZE_512];
+
+        assert_eq!(
+            kg.keygen_from_seed(8, &[0u8; FALCON_KEYGEN_SEED_SIZE], &mut sk, &mut vk),
+            Err(DeterministicKeyGenError::Validation(
+                KeyGenError::UnsupportedLogN { logn: 8 },
+            )),
+        );
+        assert_eq!(
+            kg.keygen_from_seed(FN_DSA_LOGN_512, &[0u8; FALCON_KEYGEN_SEED_SIZE - 1], &mut sk, &mut vk),
+            Err(DeterministicKeyGenError::InvalidSeedLen {
+                expected: FALCON_KEYGEN_SEED_SIZE,
+                actual: FALCON_KEYGEN_SEED_SIZE - 1,
+            }),
+        );
+        assert_eq!(
+            kg.keygen_from_stream_key(FN_DSA_LOGN_512, &[0u8; PQHD_KEYGEN_STREAM_SIZE - 1], &mut sk, &mut vk),
+            Err(DeterministicKeyGenError::InvalidStreamKeyLen {
+                expected: PQHD_KEYGEN_STREAM_SIZE,
+                actual: PQHD_KEYGEN_STREAM_SIZE - 1,
+            }),
+        );
     }
 }

@@ -3,7 +3,14 @@
 mod util;
 use util::{banner_arch, core_cycles, FakeRNG};
 
-use fn_dsa::{KeyPairGenerator, KeyPairGeneratorStandard, SigningKey, SigningKeyStandard, VerifyingKey, VerifyingKeyStandard, sign_key_size, vrfy_key_size, signature_size, DOMAIN_NONE, HASH_ID_RAW};
+use fn_dsa::{
+    KeyPairGenerator, KeyPairGeneratorStandard,
+    SigningKey, SigningKeyStandard,
+    VerifyingKey, VerifyingKeyStandard,
+    SIGN_KEY_SIZE_1024, VRFY_KEY_SIZE_1024, SIGNATURE_SIZE_1024,
+    sign_key_size, vrfy_key_size, signature_size,
+    DOMAIN_NONE, HASH_ID_RAW,
+};
 
 fn bench_verify(logn: u32) -> (f64, u8) {
     // Make a key pair.
@@ -11,25 +18,25 @@ fn bench_verify(logn: u32) -> (f64, u8) {
     let seed = z.to_le_bytes();
     let mut rng = FakeRNG::new(&seed);
     let mut kg = KeyPairGeneratorStandard::default();
-    let mut sk_buf = [0u8; sign_key_size(10)];
-    let mut vk_buf = [0u8; vrfy_key_size(10)];
-    let sk_e = &mut sk_buf[..sign_key_size(logn)];
-    let vk_e = &mut vk_buf[..vrfy_key_size(logn)];
-    kg.keygen(logn, &mut rng, sk_e, vk_e);
+    let mut sk_buf = [0u8; SIGN_KEY_SIZE_1024];
+    let mut vk_buf = [0u8; VRFY_KEY_SIZE_1024];
+    let sk_e = &mut sk_buf[..sign_key_size(logn).unwrap()];
+    let vk_e = &mut vk_buf[..vrfy_key_size(logn).unwrap()];
+    kg.keygen(logn, &mut rng, sk_e, vk_e).unwrap();
 
     // Make some signatures.
-    let mut sigs_buf = [[0u8; signature_size(10)]; 16];
-    let sig_len = signature_size(logn);
+    let mut sigs_buf = [[0u8; SIGNATURE_SIZE_1024]; 16];
+    let sig_len = signature_size(logn).unwrap();
     let mut sk = SigningKeyStandard::decode(sk_e).unwrap();
     let mut msg = [0u8];
-    for i in 0..sigs_buf.len() {
+    for sig_buf in &mut sigs_buf {
         sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, &msg,
-            &mut sigs_buf[i][..sig_len]);
+            &mut sig_buf[..sig_len]).unwrap();
     }
 
     let vk = VerifyingKeyStandard::decode(vk_e).unwrap();
     let mut tt = [0; 10];
-    for i in 0..tt.len() {
+    for (i, slot) in tt.iter_mut().enumerate() {
         let begin = core_cycles();
         for _ in 0..1000 {
             let x = vk.verify(&sigs_buf[i][..sig_len],
@@ -37,7 +44,7 @@ fn bench_verify(logn: u32) -> (f64, u8) {
             msg[0] = msg[0].wrapping_mul(((x as u8) << 1) + 3);
         }
         let end = core_cycles();
-        tt[i] = end.wrapping_sub(begin);
+        *slot = end.wrapping_sub(begin);
     }
     tt.sort();
     ((tt[tt.len() >> 1] as f64) / 1000.0, msg[0])
@@ -49,24 +56,24 @@ fn bench_verify_full(logn: u32) -> (f64, u8) {
     let seed = z.to_le_bytes();
     let mut rng = FakeRNG::new(&seed);
     let mut kg = KeyPairGeneratorStandard::default();
-    let mut sk_buf = [0u8; sign_key_size(10)];
-    let mut vk_buf = [0u8; vrfy_key_size(10)];
-    let sk_e = &mut sk_buf[..sign_key_size(logn)];
-    let vk_e = &mut vk_buf[..vrfy_key_size(logn)];
-    kg.keygen(logn, &mut rng, sk_e, vk_e);
+    let mut sk_buf = [0u8; SIGN_KEY_SIZE_1024];
+    let mut vk_buf = [0u8; VRFY_KEY_SIZE_1024];
+    let sk_e = &mut sk_buf[..sign_key_size(logn).unwrap()];
+    let vk_e = &mut vk_buf[..vrfy_key_size(logn).unwrap()];
+    kg.keygen(logn, &mut rng, sk_e, vk_e).unwrap();
 
     // Make some signatures.
-    let mut sigs_buf = [[0u8; signature_size(10)]; 16];
-    let sig_len = signature_size(logn);
+    let mut sigs_buf = [[0u8; SIGNATURE_SIZE_1024]; 16];
+    let sig_len = signature_size(logn).unwrap();
     let mut sk = SigningKeyStandard::decode(sk_e).unwrap();
     let mut msg = [0u8];
-    for i in 0..sigs_buf.len() {
+    for sig_buf in &mut sigs_buf {
         sk.sign(&mut rng,
-            &DOMAIN_NONE, &HASH_ID_RAW, &msg, &mut sigs_buf[i][..sig_len]);
+            &DOMAIN_NONE, &HASH_ID_RAW, &msg, &mut sig_buf[..sig_len]).unwrap();
     }
 
     let mut tt = [0; 10];
-    for i in 0..tt.len() {
+    for (i, slot) in tt.iter_mut().enumerate() {
         let begin = core_cycles();
         for _ in 0..1000 {
             let vk = VerifyingKeyStandard::decode(vk_e).unwrap();
@@ -75,7 +82,7 @@ fn bench_verify_full(logn: u32) -> (f64, u8) {
             msg[0] = msg[0].wrapping_mul(((x as u8) << 1) + 3);
         }
         let end = core_cycles();
-        tt[i] = end.wrapping_sub(begin);
+        *slot = end.wrapping_sub(begin);
     }
     tt.sort();
     ((tt[tt.len() >> 1] as f64) / 1000.0, msg[0])

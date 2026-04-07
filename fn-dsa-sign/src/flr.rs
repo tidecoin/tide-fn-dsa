@@ -372,35 +372,35 @@ mod tests {
     #[test]
     fn test_spec() {
         let mut sh = SHAKE256::new();
-        sh.inject(&FLR::ZERO.encode());
-        sh.inject(&(-FLR::ZERO).encode());
-        sh.inject(&FLR::ZERO.half().encode());
-        sh.inject(&FLR::ZERO.double().encode());
+        sh.inject(&FLR::ZERO.encode()).unwrap();
+        sh.inject(&(-FLR::ZERO).encode()).unwrap();
+        sh.inject(&FLR::ZERO.half().encode()).unwrap();
+        sh.inject(&FLR::ZERO.double().encode()).unwrap();
         let zero = FLR::ZERO;
         let nzero = -FLR::ZERO;
-        sh.inject(&(zero + zero).encode());
-        sh.inject(&(zero + nzero).encode());
-        sh.inject(&(nzero + zero).encode());
-        sh.inject(&(nzero + nzero).encode());
-        sh.inject(&(zero - zero).encode());
-        sh.inject(&(zero - nzero).encode());
-        sh.inject(&(nzero - zero).encode());
-        sh.inject(&(nzero - nzero).encode());
+        sh.inject(&(zero + zero).encode()).unwrap();
+        sh.inject(&(zero + nzero).encode()).unwrap();
+        sh.inject(&(nzero + zero).encode()).unwrap();
+        sh.inject(&(nzero + nzero).encode()).unwrap();
+        sh.inject(&(zero - zero).encode()).unwrap();
+        sh.inject(&(zero - nzero).encode()).unwrap();
+        sh.inject(&(nzero - zero).encode()).unwrap();
+        sh.inject(&(nzero - nzero).encode()).unwrap();
 
         for e in -60..=60 {
             for i in -5..=5 {
                 let a = FLR::from_i64((1i64 << 53) + i);
-                sh.inject(&a.encode());
+                sh.inject(&a.encode()).unwrap();
                 for j in -5..=5 {
                     let b = FLR::scaled((1i64 << 53) + j, e);
-                    sh.inject(&b.encode());
-                    sh.inject(&(a + b).encode());
+                    sh.inject(&b.encode()).unwrap();
+                    sh.inject(&(a + b).encode()).unwrap();
                     let a = a.neg();
-                    sh.inject(&(a + b).encode());
+                    sh.inject(&(a + b).encode()).unwrap();
                     let b = b.neg();
-                    sh.inject(&(a + b).encode());
+                    sh.inject(&(a + b).encode()).unwrap();
                     let a = a.neg();
-                    sh.inject(&(a + b).encode());
+                    sh.inject(&(a + b).encode()).unwrap();
                 }
             }
         }
@@ -410,55 +410,55 @@ mod tests {
             let j = (rand_u64(&mut rng) as i64) >> (ctr & 63);
             assert!(j != -9223372036854775808);
             let a = FLR::from_i64(j);
-            sh.inject(&a.encode());
+            sh.inject(&a.encode()).unwrap();
 
             let sc = ((rng.next_u16() as i32) & 0xFF) - 128;
-            sh.inject(&FLR::scaled(j, sc).encode());
+            sh.inject(&FLR::scaled(j, sc).encode()).unwrap();
 
             let j = rand_u64(&mut rng) as i64;
             let a = FLR::scaled(j, -8);
-            sh.inject(&a.rint().to_le_bytes());
+            sh.inject(&a.rint().to_le_bytes()).unwrap();
 
             let a = FLR::scaled(j, -52);
-            sh.inject(&a.trunc().to_le_bytes());
-            sh.inject(&a.floor().to_le_bytes());
+            sh.inject(&a.trunc().to_le_bytes()).unwrap();
+            sh.inject(&a.floor().to_le_bytes()).unwrap();
 
             let a = rand_fp(&mut rng);
             let b = rand_fp(&mut rng);
 
-            sh.inject(&(a + b).encode());
-            sh.inject(&(b + a).encode());
-            sh.inject(&(a + zero).encode());
-            sh.inject(&(zero + a).encode());
-            sh.inject(&(a + (-a)).encode());
-            sh.inject(&((-a) + a).encode());
+            sh.inject(&(a + b).encode()).unwrap();
+            sh.inject(&(b + a).encode()).unwrap();
+            sh.inject(&(a + zero).encode()).unwrap();
+            sh.inject(&(zero + a).encode()).unwrap();
+            sh.inject(&(a + (-a)).encode()).unwrap();
+            sh.inject(&((-a) + a).encode()).unwrap();
 
-            sh.inject(&(a - b).encode());
-            sh.inject(&(b - a).encode());
-            sh.inject(&(a - zero).encode());
-            sh.inject(&(zero - a).encode());
-            sh.inject(&(a - a).encode());
+            sh.inject(&(a - b).encode()).unwrap();
+            sh.inject(&(b - a).encode()).unwrap();
+            sh.inject(&(a - zero).encode()).unwrap();
+            sh.inject(&(zero - a).encode()).unwrap();
+            sh.inject(&(a - a).encode()).unwrap();
 
-            sh.inject(&(-a).encode());
-            sh.inject(&a.half().encode());
-            sh.inject(&a.double().encode());
+            sh.inject(&(-a).encode()).unwrap();
+            sh.inject(&a.half().encode()).unwrap();
+            sh.inject(&a.double().encode()).unwrap();
 
-            sh.inject(&(a * b).encode());
-            sh.inject(&(b * a).encode());
-            sh.inject(&(a * zero).encode());
-            sh.inject(&(zero * a).encode());
+            sh.inject(&(a * b).encode()).unwrap();
+            sh.inject(&(b * a).encode()).unwrap();
+            sh.inject(&(a * zero).encode()).unwrap();
+            sh.inject(&(zero * a).encode()).unwrap();
 
-            sh.inject(&(a / b).encode());
+            sh.inject(&(a / b).encode()).unwrap();
 
-            sh.inject(&a.abs().sqrt().encode());
+            sh.inject(&a.abs().sqrt().encode()).unwrap();
         }
 
         // Reference hash was computed on 64-bit x86, where all
         // operations have been verified by comparing with the native
         // SSE2 support.
         let mut buf = [0u8; 32];
-        sh.flip();
-        sh.extract(&mut buf);
+        sh.flip().unwrap();
+        sh.extract(&mut buf).unwrap();
         assert!(buf[..] == hex::decode("54ada30bdb43e1f14465d944f2a665ca7eaa6e9678e9d035b0fcb8167efe9871").unwrap());
     }
 }

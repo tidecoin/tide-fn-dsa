@@ -59,31 +59,68 @@
 //!
 //! ## Example usage
 //!
-//! ```ignore
-//! use rand_core::OsRng;
+//! For Tidecoin/PQClean-compatible deterministic Falcon key derivation,
+//! use `keygen_from_seed()` or `keygen_from_stream_key()` on the Falcon
+//! key generators. These deterministic APIs intentionally pin the scalar
+//! SHAKE256 seed-expansion path so that outputs are stable regardless of
+//! whether the `shake256x4` feature is enabled.
+//!
+//! ```no_run
 //! use fn_dsa::{
-//!     sign_key_size, vrfy_key_size, signature_size, FN_DSA_LOGN_512,
+//!     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, SIGNATURE_SIZE_512, FN_DSA_LOGN_512,
 //!     KeyPairGenerator, KeyPairGeneratorStandard,
 //!     SigningKey, SigningKeyStandard,
 //!     VerifyingKey, VerifyingKeyStandard,
-//!     DOMAIN_NONE, HASH_ID_RAW,
+//!     DOMAIN_NONE, HASH_ID_RAW, CryptoRng, RngCore, RngError,
 //! };
+//! #
+//! # struct DemoRng(u64);
+//! # impl CryptoRng for DemoRng {}
+//! # impl RngCore for DemoRng {
+//! #     fn next_u32(&mut self) -> u32 {
+//! #         let x = self.0 as u32;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn next_u64(&mut self) -> u64 {
+//! #         let x = self.0;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn fill_bytes(&mut self, dest: &mut [u8]) {
+//! #         for chunk in dest.chunks_mut(8) {
+//! #             let bytes = self.next_u64().to_le_bytes();
+//! #             let len = chunk.len();
+//! #             chunk.copy_from_slice(&bytes[..len]);
+//! #         }
+//! #     }
+//! #     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+//! #         self.fill_bytes(dest);
+//! #         Ok(())
+//! #     }
+//! # }
 //! 
 //! // Generate key pair.
+//! let mut rng = DemoRng(1);
 //! let mut kg = KeyPairGeneratorStandard::default();
-//! let mut sign_key = [0u8; sign_key_size(FN_DSA_LOGN_512)];
-//! let mut vrfy_key = [0u8; vrfy_key_size(FN_DSA_LOGN_512)];
-//! kg.keygen(FN_DSA_LOGN_512, &mut OsRng, &mut sign_key, &mut vrfy_key);
+//! let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+//! let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+//! kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sign_key, &mut vrfy_key)
+//!     .unwrap();
 //! 
 //! // Sign a message with the signing key.
-//! let mut sk = SigningKeyStandard::decode(encoded_signing_key)?;
-//! let mut sig = vec![0u8; signature_size(sk.get_logn())];
-//! sk.sign(&mut OsRng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig);
+//! let encoded_signing_key = [0u8; SIGN_KEY_SIZE_512];
+//! let mut sk = SigningKeyStandard::decode(&encoded_signing_key)
+//!     .expect("valid signing key bytes");
+//! let mut sig = [0u8; SIGNATURE_SIZE_512];
+//! sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig)
+//!     .unwrap();
 //! 
 //! // Verify a signature with the verifying key.
-//! match VerifyingKeyStandard::decode(encoded_verifying_key) {
+//! let encoded_verifying_key = [0u8; VRFY_KEY_SIZE_512];
+//! match VerifyingKeyStandard::decode(&encoded_verifying_key) {
 //!     Some(vk) => {
-//!         if vk.verify(sig, &DOMAIN_NONE, &HASH_ID_RAW, b"message") {
+//!         if vk.verify(&sig, &DOMAIN_NONE, &HASH_ID_RAW, b"message") {
 //!             // signature is valid
 //!         } else {
 //!             // signature is not valid
@@ -106,9 +143,18 @@
 pub use fn_dsa_comm::{
     sign_key_size, vrfy_key_size, signature_size,
     FN_DSA_LOGN_512, FN_DSA_LOGN_1024,
+    SIGN_KEY_SIZE_512, SIGN_KEY_SIZE_1024,
+    VRFY_KEY_SIZE_512, VRFY_KEY_SIZE_1024,
+    SIGNATURE_SIZE_512, SIGNATURE_SIZE_1024,
+    FalconProfile,
+    FALCON_NONCE_LEN,
+    TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX,
+    TIDECOIN_LEGACY_FALCON512_SIG_MAX,
+    LogNError,
+    DomainContextError,
+    HashIdentifierError, HashToPointError, hash_to_point, hash_to_point_falcon,
     HashIdentifier,
     HASH_ID_RAW,
-    HASH_ID_ORIGINAL_FALCON,
     HASH_ID_SHA256,
     HASH_ID_SHA384,
     HASH_ID_SHA512,
@@ -122,9 +168,18 @@ pub use fn_dsa_comm::{
     DOMAIN_NONE,
     CryptoRng, RngCore, RngError,
 };
-pub use fn_dsa_comm::shake::{SHAKE, SHAKE128, SHAKE256, SHA3_224, SHA3_256, SHA3_384, SHA3_512};
-pub use fn_dsa_kgen::{KeyPairGenerator, KeyPairGeneratorStandard, KeyPairGeneratorWeak, KeyPairGenerator512, KeyPairGenerator1024};
-pub use fn_dsa_sign::{SigningKey, SigningKeyStandard, SigningKeyWeak, SigningKey512, SigningKey1024};
+pub use fn_dsa_comm::shake::{
+    SHAKE, SHAKE128, SHAKE256, SHA3_224, SHA3_256, SHA3_384, SHA3_512,
+    ShakeError,
+};
+pub use fn_dsa_kgen::{KeyGenError, KeyPairGenerator, KeyPairGeneratorStandard, KeyPairGeneratorWeak, KeyPairGenerator512, KeyPairGenerator1024};
+pub use fn_dsa_kgen::{
+    DeterministicKeyGenError,
+    FALCON_KEYGEN_SEED_SIZE,
+    PQHD_KEYGEN_STREAM_SIZE,
+    PQHD_MAX_DETERMINISTIC_ATTEMPTS,
+};
+pub use fn_dsa_sign::{SigningKey, SigningKeyError, SigningKeyStandard, SigningKeyWeak, SigningKey512, SigningKey1024};
 pub use fn_dsa_vrfy::{VerifyingKey, VerifyingKeyStandard, VerifyingKeyWeak, VerifyingKey512, VerifyingKey1024};
 
 #[cfg(test)]
@@ -145,8 +200,8 @@ mod tests {
     impl FakeRng1 {
         fn new(seed: &[u8]) -> Self {
             let mut sh = SHAKE256::new();
-            sh.inject(seed);
-            sh.flip();
+            sh.inject(seed).unwrap();
+            sh.flip().unwrap();
             Self(sh)
         }
     }
@@ -155,7 +210,7 @@ mod tests {
         fn next_u32(&mut self) -> u32 { unimplemented!(); }
         fn next_u64(&mut self) -> u64 { unimplemented!(); }
         fn fill_bytes(&mut self, dest: &mut [u8]) {
-            self.0.extract(dest);
+            self.0.extract(dest).unwrap();
         }
         fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
             self.fill_bytes(dest);
@@ -172,7 +227,7 @@ mod tests {
     impl FakeRng2 {
         fn new(seed: &[u8]) -> Self {
             let mut sh = SHAKE256::new();
-            sh.inject(seed);
+            sh.inject(seed).unwrap();
             Self { sh, buf: [0u8; 96], ptr: 96, ctr: 0 }
         }
     }
@@ -185,10 +240,10 @@ mod tests {
             let mut ptr = self.ptr;
             while j < dest.len() {
                 if ptr == self.buf.len() {
-                    let mut sh = self.sh.clone();
-                    sh.inject(&self.ctr.to_le_bytes());
-                    sh.flip();
-                    sh.extract(&mut self.buf);
+                    let mut sh = self.sh;
+                    sh.inject(&self.ctr.to_le_bytes()).unwrap();
+                    sh.flip().unwrap();
+                    sh.extract(&mut self.buf).unwrap();
                     self.ctr += 1;
                     ptr = 0;
                 }
@@ -209,39 +264,41 @@ mod tests {
         SK: SigningKey, VK: VerifyingKey>(logn: u32)
     {
         let mut kg = KG::default();
-        let mut sk_buf = [0u8; sign_key_size(10)];
-        let mut vk_buf = [0u8; vrfy_key_size(10)];
-        let mut vk2_buf = [0u8; vrfy_key_size(10)];
-        let mut sig_buf = [0u8; signature_size(10)];
-        let sk_e = &mut sk_buf[..sign_key_size(logn)];
-        let vk_e = &mut vk_buf[..vrfy_key_size(logn)];
-        let vk2_e = &mut vk2_buf[..vrfy_key_size(logn)];
-        let sig = &mut sig_buf[..signature_size(logn)];
+        let mut sk_buf = [0u8; SIGN_KEY_SIZE_1024];
+        let mut vk_buf = [0u8; VRFY_KEY_SIZE_1024];
+        let mut vk2_buf = [0u8; VRFY_KEY_SIZE_1024];
+        let mut sig_buf = [0u8; SIGNATURE_SIZE_1024];
+        let sk_e = &mut sk_buf[..sign_key_size(logn).unwrap()];
+        let vk_e = &mut vk_buf[..vrfy_key_size(logn).unwrap()];
+        let vk2_e = &mut vk2_buf[..vrfy_key_size(logn).unwrap()];
+        let sig = &mut sig_buf[..signature_size(logn).unwrap()];
         for t in 0..2 {
             // We use a reproducible source of random bytes.
             let mut rng = FakeRng1::new(&[logn as u8, t]);
 
             // Generate key pair.
-            kg.keygen(logn, &mut rng, sk_e, vk_e);
+            kg.keygen(logn, &mut rng, sk_e, vk_e).unwrap();
 
             // Decode private key and check that it matches the public key.
             let mut sk = SK::decode(sk_e).unwrap();
             assert!(sk.get_logn() == logn);
-            sk.to_verifying_key(vk2_e);
+            sk.to_verifying_key(vk2_e).unwrap();
             assert!(vk_e == vk2_e);
 
             // Sign a test message.
-            sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, &b"test1"[..], sig);
+            sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, &b"test1"[..], sig)
+                .unwrap();
 
             // Verify the signature. Check that modifying the context,
             // message or signature results in a verification failure.
-            let vk = VK::decode(&vk_e).unwrap();
+            let vk = VK::decode(vk_e).unwrap();
             assert!(vk.verify(sig,
                 &DOMAIN_NONE, &HASH_ID_RAW, &b"test1"[..]));
             assert!(!vk.verify(sig,
                 &DOMAIN_NONE, &HASH_ID_RAW, &b"test2"[..]));
             assert!(!vk.verify(sig,
-                &DomainContext(b"other"), &HASH_ID_RAW, &b"test1"[..]));
+                &DomainContext::new(b"other").unwrap(),
+                &HASH_ID_RAW, &b"test1"[..]));
             sig[sig.len() >> 1] ^= 0x40;
             assert!(!vk.verify(sig,
                 &DOMAIN_NONE, &HASH_ID_RAW, &b"test1"[..]));
@@ -250,11 +307,11 @@ mod tests {
 
     #[test]
     fn self_test() {
-        for logn in 9..10 {
+        for logn in 9..=10 {
             self_test_inner::<KeyPairGeneratorStandard,
                 SigningKeyStandard, VerifyingKeyStandard>(logn);
         }
-        for logn in 2..8 {
+        for logn in 2..=8 {
             self_test_inner::<KeyPairGeneratorWeak,
                 SigningKeyWeak, VerifyingKeyWeak>(logn);
         }
@@ -491,25 +548,25 @@ mod tests {
             num as u8, (num >> 8) as u8, (num >> 16) as u8, (num >> 24) as u8];
         let mut rng2 = FakeRng2::new(&seed2);
 
-        let mut sk_buf = [0u8; sign_key_size(10)];
-        let mut vk_buf = [0u8; vrfy_key_size(10)];
-        let mut sig_buf = [0u8; signature_size(10)];
-        let sk = &mut sk_buf[..sign_key_size(logn)];
-        let vk = &mut vk_buf[..vrfy_key_size(logn)];
-        let sig = &mut sig_buf[..signature_size(logn)];
+        let mut sk_buf = [0u8; SIGN_KEY_SIZE_1024];
+        let mut vk_buf = [0u8; VRFY_KEY_SIZE_1024];
+        let mut sig_buf = [0u8; SIGNATURE_SIZE_1024];
+        let sk = &mut sk_buf[..sign_key_size(logn).unwrap()];
+        let vk = &mut vk_buf[..vrfy_key_size(logn).unwrap()];
+        let sig = &mut sig_buf[..signature_size(logn).unwrap()];
 
-        KG::default().keygen(logn, &mut rng1, sk, vk);
+        KG::default().keygen(logn, &mut rng1, sk, vk).unwrap();
         let mut s = SK::decode(sk).unwrap();
         let v = VK::decode(vk).unwrap();
-        let dom = DomainContext(b"domain");
+        let dom = DomainContext::new(b"domain").unwrap();
         if (num & 1) == 0 {
-            s.sign(&mut rng2, &dom, &HASH_ID_RAW, b"message", sig);
+            s.sign(&mut rng2, &dom, &HASH_ID_RAW, b"message", sig).unwrap();
             assert!(v.verify(sig, &dom, &HASH_ID_RAW, b"message"));
         } else {
             let mut sh = SHA3_256::new();
             sh.update(&b"message"[..]);
             let hv = sh.digest();
-            s.sign(&mut rng2, &dom, &HASH_ID_SHA3_256, &hv, sig);
+            s.sign(&mut rng2, &dom, &HASH_ID_SHA3_256, &hv, sig).unwrap();
             assert!(v.verify(sig, &dom, &HASH_ID_SHA3_256, &hv));
         }
         let mut sh = SHA3_256::new();
@@ -521,9 +578,9 @@ mod tests {
 
     #[test]
     fn test_kat() {
-        for i in 0..KAT.len() {
+        for (i, kat_rows) in KAT.iter().enumerate() {
             let logn = (i as u32) + 2;
-            for j in 0..KAT[i].len() {
+            for (j, kat) in kat_rows.iter().enumerate() {
                 let r = if logn <= 8 {
                     inner_kat::<KeyPairGeneratorWeak,
                         SigningKeyWeak,
@@ -533,8 +590,178 @@ mod tests {
                         SigningKeyStandard,
                         VerifyingKeyStandard>(logn, j as u32)
                 };
-                assert!(r[..] == hex::decode(KAT[i][j]).unwrap());
+                assert!(r[..] == hex::decode(kat).unwrap());
             }
         }
+    }
+
+    #[test]
+    fn keygen_reports_validation_errors() {
+        let mut kg = KeyPairGeneratorStandard::default();
+        let mut rng = FakeRng1::new(b"keygen");
+        let mut sk = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk = [0u8; VRFY_KEY_SIZE_512];
+        let mut short_sk = [0u8; SIGN_KEY_SIZE_512 - 1];
+        let mut short_vk = [0u8; VRFY_KEY_SIZE_512 - 1];
+
+        assert_eq!(
+            kg.keygen(8, &mut rng, &mut sk, &mut vk),
+            Err(KeyGenError::UnsupportedLogN { logn: 8 }),
+        );
+        assert_eq!(
+            kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut short_sk, &mut vk),
+            Err(KeyGenError::InvalidSigningKeyBufferLen {
+                expected: SIGN_KEY_SIZE_512,
+                actual: SIGN_KEY_SIZE_512 - 1,
+            }),
+        );
+        assert_eq!(
+            kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sk, &mut short_vk),
+            Err(KeyGenError::InvalidVerifyingKeyBufferLen {
+                expected: VRFY_KEY_SIZE_512,
+                actual: VRFY_KEY_SIZE_512 - 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn size_helpers_report_validation_errors() {
+        assert_eq!(
+            sign_key_size(1),
+            Err(LogNError::UnsupportedLogN { logn: 1 }),
+        );
+        assert_eq!(
+            vrfy_key_size(11),
+            Err(LogNError::UnsupportedLogN { logn: 11 }),
+        );
+        assert_eq!(
+            signature_size(0),
+            Err(LogNError::UnsupportedLogN { logn: 0 }),
+        );
+    }
+
+    #[test]
+    fn sign_reports_validation_errors() {
+        let mut kg = KeyPairGeneratorStandard::default();
+        let mut rng = FakeRng1::new(b"sign");
+        let mut sk_buf = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_buf = [0u8; VRFY_KEY_SIZE_512];
+        kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sk_buf, &mut vk_buf)
+            .unwrap();
+
+        let mut sk = SigningKeyStandard::decode(&sk_buf).unwrap();
+        let vk = VerifyingKeyStandard::decode(&vk_buf).unwrap();
+        let mut short_vk = [0u8; VRFY_KEY_SIZE_512 - 1];
+        let mut short_sig = [0u8; SIGNATURE_SIZE_512 - 1];
+        let mut sig = [0u8; SIGNATURE_SIZE_512];
+        let long_ctx_bytes = [0u8; 256];
+        let long_ctx = DomainContext::new(&long_ctx_bytes);
+        let good_ctx = DomainContext::new(b"ctx").unwrap();
+
+        assert_eq!(
+            sk.to_verifying_key(&mut short_vk),
+            Err(SigningKeyError::InvalidVerifyingKeyBufferLen {
+                expected: VRFY_KEY_SIZE_512,
+                actual: VRFY_KEY_SIZE_512 - 1,
+            }),
+        );
+        assert_eq!(
+            sk.sign(&mut rng, &good_ctx, &HASH_ID_RAW, b"message", &mut short_sig),
+            Err(SigningKeyError::InvalidSignatureBufferLen {
+                expected: SIGNATURE_SIZE_512,
+                actual: SIGNATURE_SIZE_512 - 1,
+            }),
+        );
+        assert_eq!(
+            long_ctx,
+            Err(DomainContextError::Oversized { actual: 256 }),
+        );
+
+        sk.sign(&mut rng, &good_ctx, &HASH_ID_RAW, b"message", &mut sig)
+            .unwrap();
+        assert!(!vk.verify(&sig, &DOMAIN_NONE, &HASH_ID_RAW, b"other"));
+    }
+
+    #[test]
+    fn hash_to_point_reports_validation_errors() {
+        let nonce = [0u8; 40];
+        let short_nonce = [0u8; 39];
+        let hashed_key = [0u8; 64];
+        let short_hashed_key = [0u8; 63];
+        let mut c = [0u16; 4];
+        let long_ctx_bytes = [0u8; 256];
+        let long_ctx = DomainContext::new(&long_ctx_bytes);
+
+        assert_eq!(
+            hash_to_point(&short_nonce, &hashed_key, &DOMAIN_NONE, &HASH_ID_RAW, b"m", &mut c),
+            Err(HashToPointError::InvalidNonceLength { actual: 39 }),
+        );
+        assert_eq!(
+            hash_to_point(&nonce, &short_hashed_key, &DOMAIN_NONE, &HASH_ID_RAW, b"m", &mut c),
+            Err(HashToPointError::InvalidHashedVerifyingKeyLength { actual: 63 }),
+        );
+        assert_eq!(
+            long_ctx,
+            Err(DomainContextError::Oversized { actual: 256 }),
+        );
+    }
+
+    #[test]
+    fn hash_identifier_reports_validation_errors() {
+        assert_eq!(HashIdentifier::new(b""), Err(HashIdentifierError::Empty));
+        assert_eq!(
+            HashIdentifier::new(&[0x01]),
+            Err(HashIdentifierError::InvalidSingleByteValue { actual: 0x01 }),
+        );
+
+        assert_eq!(HashIdentifier::new(HASH_ID_RAW.as_bytes()), Ok(HASH_ID_RAW));
+        assert_eq!(
+            HashIdentifier::new(HASH_ID_SHA3_256.as_bytes()),
+            Ok(HASH_ID_SHA3_256),
+        );
+    }
+
+    #[test]
+    fn falcon_profiles_roundtrip() {
+        let mut kg = KeyPairGeneratorStandard::default();
+        let mut rng = FakeRng1::new(b"falcon-profile");
+        let mut sk_buf = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_buf = [0u8; VRFY_KEY_SIZE_512];
+        kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sk_buf, &mut vk_buf)
+            .unwrap();
+
+        let mut sk = SigningKeyStandard::decode(&sk_buf).unwrap();
+        let vk = VerifyingKeyStandard::decode(&vk_buf).unwrap();
+        let message = b"profiled message";
+
+        let mut pqclean_sig = [0u8; SIGNATURE_SIZE_512];
+        let pqclean_len = sk.sign_falcon(
+            &mut rng,
+            FalconProfile::PqClean,
+            message,
+            &mut pqclean_sig,
+        ).unwrap();
+        assert!(pqclean_len > 1 + FALCON_NONCE_LEN);
+        assert!(pqclean_len <= SIGNATURE_SIZE_512);
+        assert!(vk.verify_falcon(
+            FalconProfile::PqClean,
+            &pqclean_sig[..pqclean_len],
+            message,
+        ));
+
+        let mut tidecoin_sig = [0u8; TIDECOIN_LEGACY_FALCON512_SIG_MAX];
+        let tidecoin_len = sk.sign_falcon(
+            &mut rng,
+            FalconProfile::TidecoinLegacyFalcon512,
+            message,
+            &mut tidecoin_sig,
+        ).unwrap();
+        assert!(tidecoin_len > 1 + FALCON_NONCE_LEN);
+        assert!(tidecoin_len <= TIDECOIN_LEGACY_FALCON512_SIG_MAX);
+        assert!(vk.verify_falcon(
+            FalconProfile::TidecoinLegacyFalcon512,
+            &tidecoin_sig[..tidecoin_len],
+            message,
+        ));
     }
 }

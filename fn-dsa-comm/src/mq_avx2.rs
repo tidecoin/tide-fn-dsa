@@ -1,5 +1,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::needless_return)]
 
 //! # Computations modulo q = 12289 (with AVX2 optimizations)
 //!
@@ -19,6 +23,11 @@ use core::mem::transmute;
 
 /// Check whether the provided polynomial with small coefficient is
 /// invertible modulo `X^n+1` and modulo q.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must also
+/// ensure that `f.len() >= 1 << logn` and `tmp.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_small_is_invertible(logn: u32,
     f: &[i8], tmp: &mut [u16]) -> bool
@@ -49,6 +58,13 @@ pub unsafe fn mqpoly_small_is_invertible(logn: u32,
 ///
 /// This function assumes that `f` is invertible. Output is in external
 /// representation (coefficients are in `[0,q-1]`).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `f.len() >= 1 << logn`, `g.len() >= 1 << logn`,
+/// `h.len() >= 1 << logn`, and `tmp.len() >= 1 << logn`. The source
+/// polynomial `f` must be invertible modulo `X^n + 1` and modulo `q`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_div_small(logn: u32,
     f: &[i8], g: &[i8], h: &mut [u16], tmp: &mut [u16])
@@ -92,6 +108,11 @@ const R2: u32 = 5664;
 /// (external representation).
 ///
 /// The source values are assumed to be in the `[-q/2,+q/2]` range.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `v.len() >= 1 << logn` and `d.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_signed_to_ext(logn: u32, v: &[i16], d: &mut [u16]) {
     if logn >= 4 {
@@ -296,6 +317,11 @@ unsafe fn mq_div_x16(x: __m256i, y: __m256i) -> __m256i {
 /// representation.
 ///
 /// Converted polynomial is written into `d`.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `f.len() >= 1 << logn` and `d.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_small_to_int(logn: u32, f: &[i8], d: &mut [u16]) {
     if logn >= 4 {
@@ -332,6 +358,11 @@ pub unsafe fn mqpoly_small_to_int(logn: u32, f: &[i8], d: &mut [u16]) {
 /// then the function succeeds and returns `true`. Otherwise, the
 /// function fails and returns `false`; values obtained for out-of-range
 /// coefficients are unspecified.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `d.len() >= 1 << logn` and `f.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_int_to_small(logn: u32, d: &[u16], f: &mut [i8]) -> bool {
     // Internal representation is in [1,q]. If the value is in the
@@ -369,6 +400,11 @@ pub unsafe fn mqpoly_int_to_small(logn: u32, d: &[u16], f: &mut [i8]) -> bool {
 
 /// Given a polynomial in external representation, convert it to internal
 /// representation (in-place).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_ext_to_int(logn: u32, a: &mut [u16]) {
     // Internal representation is the same as external, except that
@@ -393,6 +429,11 @@ pub unsafe fn mqpoly_ext_to_int(logn: u32, a: &mut [u16]) {
 
 /// Given a polynomial in internal representation, convert it to external
 /// representation (in-place).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_int_to_ext(logn: u32, a: &mut [u16]) {
     // External representation is the same as internal, except that
@@ -492,6 +533,11 @@ unsafe fn NTT32(ya0: __m256i, ya1: __m256i, k: usize) -> (__m256i, __m256i) {
 }
 
 /// Convert a polynomial from internal representation to NTT (in-place).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_int_to_NTT(logn: u32, a: &mut [u16]) {
     if logn == 0 {
@@ -633,6 +679,11 @@ unsafe fn iNTT32(ya0: __m256i, ya1: __m256i, k: usize) -> (__m256i, __m256i) {
 }
 
 /// Convert a polynomial from NTT to internal representation (in-place).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_NTT_to_int(logn: u32, a: &mut [u16]) {
     if logn == 0 {
@@ -695,6 +746,11 @@ pub unsafe fn mqpoly_NTT_to_int(logn: u32, a: &mut [u16]) {
 
 /// Multiply polynomial `a` by polynomial `b`; both must be in NTT
 /// representation.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn` and `b.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_mul_ntt(logn: u32, a: &mut [u16], b: &[u16]) {
     if logn >= 4 {
@@ -720,6 +776,11 @@ pub unsafe fn mqpoly_mul_ntt(logn: u32, a: &mut [u16], b: &[u16]) {
 /// If `b` is invertible (none of its NTT coefficients are zero), then
 /// this returns `true`; otherwise, this returns false and the impacted
 /// result coefficients are set to the internal representation of zero.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn` and `b.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_div_ntt(logn: u32, a: &mut [u16], b: &[u16]) -> bool {
     if logn >= 4 {
@@ -749,6 +810,11 @@ pub unsafe fn mqpoly_div_ntt(logn: u32, a: &mut [u16], b: &[u16]) -> bool {
 
 /// Subtract polynomial `b` from polynomial `a`; both must be in internal
 /// representation, or both must be in NTT representation.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn` and `b.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_sub_int(logn: u32, a: &mut [u16], b: &[u16]) {
     if logn >= 4 {
@@ -772,6 +838,11 @@ pub unsafe fn mqpoly_sub_int(logn: u32, a: &mut [u16], b: &[u16]) {
 ///
 /// The polynomial must be in external representation. If the squared norm
 /// exceeds `2^31-1` then `2^32-1` is returned.
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn mqpoly_sqnorm(logn: u32, a: &[u16]) -> u32 {
     if logn >= 4 {
@@ -833,6 +904,11 @@ pub unsafe fn mqpoly_sqnorm(logn: u32, a: &[u16]) -> u32 {
 ///
 /// This function assumes that the squared norm fits on 32 bits (this is
 /// guaranteed if `logn <= 10` and all coefficients are in `[-2047,+2047]`).
+///
+/// # Safety
+///
+/// AVX2 must be supported by the current CPU. The caller must ensure
+/// that `a.len() >= 1 << logn`.
 #[target_feature(enable = "avx2")]
 pub unsafe fn signed_poly_sqnorm(logn: u32, a: &[i16]) -> u32 {
     if logn >= 4 {
@@ -897,11 +973,11 @@ mod tests {
         let mut sh = crate::shake::SHAKE256::new();
         for i in 0..n {
             sh.reset();
-            sh.inject(&seed.to_le_bytes());
-            sh.inject(&(i as u16).to_le_bytes());
-            sh.flip();
+            sh.inject(&seed.to_le_bytes()).unwrap();
+            sh.inject(&(i as u16).to_le_bytes()).unwrap();
+            sh.flip().unwrap();
             let mut hv = [0u8; 16];
-            sh.extract(&mut hv);
+            sh.extract(&mut hv).unwrap();
             t1[i] = (u64::from_le_bytes(*<&[u8; 8]>::try_from(&hv[0..8]).unwrap()) % 12289) as u16;
             t2[i] = (u64::from_le_bytes(*<&[u8; 8]>::try_from(&hv[8..16]).unwrap()) % 12289) as u16;
         }
@@ -995,14 +1071,14 @@ mod tests {
                 // half of the time. The signs are also randomized.
                 let mut a = [0u16; 256];
                 let mut sh = crate::shake::SHAKE256::new();
-                sh.inject(&b"sqnorm_sat"[..]);
-                sh.flip();
+                sh.inject(&b"sqnorm_sat"[..]).unwrap();
+                sh.flip().unwrap();
                 for _ in 0..100 {
                     let mut rs = 0;
                     for i in 0..256 {
                         // x <- absolute value of next coefficient.
                         let mut buf = [0u8; 4];
-                        sh.extract(&mut buf);
+                        sh.extract(&mut buf).unwrap();
                         let x = u32::from_le_bytes(buf) % 5040;
                         rs += (x * x) as u64;
 

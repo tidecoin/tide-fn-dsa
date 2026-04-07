@@ -2695,11 +2695,11 @@ mod tests {
         let mut sh = SHAKE256::new();
         for i in 0..2048 {
             let x = GM[i].encode();
-            sh.inject(&x);
+            sh.inject(&x).unwrap();
         }
-        sh.flip();
+        sh.flip().unwrap();
         let mut buf = [0u8; 32];
-        sh.extract(&mut buf);
+        sh.extract(&mut buf).unwrap();
         // Reference hash was obtained from the constants in the Falcon
         // reference code, which were initially computed with Sage with
         // large precision.

@@ -1,15 +1,121 @@
+#![allow(clippy::identity_op)]
+#![allow(clippy::needless_range_loop)]
+
+use core::fmt;
+
+/// Error type for codec operations.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CodecError {
+    /// The requested bit width is unsupported.
+    InvalidNBits { nbits: u32 },
+
+    /// The destination buffer is too short.
+    DestinationTooShort { needed: usize, actual: usize },
+
+    /// The source buffer is too short.
+    SourceTooShort { needed: usize, actual: usize },
+
+    /// The source buffer length does not match the expected length.
+    SourceLengthMismatch { expected: usize, actual: usize },
+
+    /// The coefficient count is invalid for the codec.
+    InvalidCoefficientCount { actual: usize },
+
+    /// A source coefficient is outside of the supported range.
+    CoefficientOutOfRange,
+
+    /// The encoded data is invalid or non-canonical.
+    InvalidEncoding,
+}
+
+impl fmt::Display for CodecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InvalidNBits { nbits } => {
+                write!(f, "invalid coefficient bit width: {nbits}")
+            }
+            Self::DestinationTooShort { needed, actual } => write!(
+                f,
+                "destination buffer too short: need {needed} bytes, got {actual}",
+            ),
+            Self::SourceTooShort { needed, actual } => write!(
+                f,
+                "source buffer too short: need {needed} bytes, got {actual}",
+            ),
+            Self::SourceLengthMismatch { expected, actual } => write!(
+                f,
+                "source buffer length mismatch: expected {expected} bytes, got {actual}",
+            ),
+            Self::InvalidCoefficientCount { actual } => write!(
+                f,
+                "invalid coefficient count for codec: {actual}",
+            ),
+            Self::CoefficientOutOfRange => {
+                write!(f, "source coefficient is outside of the supported range")
+            }
+            Self::InvalidEncoding => {
+                write!(f, "invalid or non-canonical encoded data")
+            }
+        }
+    }
+}
+
+const fn check_trim_nbits(nbits: u32) -> Result<(), CodecError> {
+    if nbits < 2 || nbits > 8 {
+        Err(CodecError::InvalidNBits { nbits })
+    } else {
+        Ok(())
+    }
+}
+
+const fn trim_i8_size(n: usize, nbits: u32) -> Result<usize, CodecError> {
+    if let Err(err) = check_trim_nbits(nbits) {
+        Err(err)
+    } else {
+        Ok(((n * (nbits as usize)) + 7) >> 3)
+    }
+}
+
+const fn modq_size(n: usize) -> Result<usize, CodecError> {
+    if (n & 3) != 0 {
+        Err(CodecError::InvalidCoefficientCount { actual: n })
+    } else {
+        Ok(7 * (n >> 2))
+    }
+}
+
 /// Encode small integers into bytes, with a fixed size per value.
 ///
 /// Encode the provided sequence of signed integers `f`, with `nbits` bits per
 /// value, into the destination buffer `d`. The actual number of written bytes
 /// is returned. If the total encoded size is not an integral number of bytes,
 /// then extra padding bits of value 0 are used.
-pub fn trim_i8_encode(f: &[i8], nbits: u32, d: &mut [u8]) -> usize {
+///
+/// The source coefficients must all lie in the `[-(2^(nbits-1)-1),
+/// +(2^(nbits-1)-1)]` range.
+pub fn trim_i8_encode(
+    f: &[i8],
+    nbits: u32,
+    d: &mut [u8],
+) -> Result<usize, CodecError> {
+    let needed = trim_i8_size(f.len(), nbits)?;
+    if d.len() < needed {
+        return Err(CodecError::DestinationTooShort {
+            needed,
+            actual: d.len(),
+        });
+    }
     let mut k = 0;
     let mut acc = 0;
     let mut acc_len = 0;
     let mask = (1u32 << nbits) - 1;
+    let maxv = (1i32 << (nbits - 1)) - 1;
+    let minv = -maxv;
     for i in 0..f.len() {
+        let x = f[i] as i32;
+        if x < minv || x > maxv {
+            return Err(CodecError::CoefficientOutOfRange);
+        }
         acc = (acc << nbits) | (((f[i] as u8) as u32) & mask);
         acc_len += nbits;
         while acc_len >= 8 {
@@ -22,7 +128,7 @@ pub fn trim_i8_encode(f: &[i8], nbits: u32, d: &mut [u8]) -> usize {
         d[k] = (acc << (8 - acc_len)) as u8;
         k += 1;
     }
-    k
+    Ok(k)
 }
 
 /// Decode small integers from bytes, with a fixed size per value.
@@ -30,7 +136,7 @@ pub fn trim_i8_encode(f: &[i8], nbits: u32, d: &mut [u8]) -> usize {
 /// Decode the provided bytes `d` into the signed integers `f`, using
 /// `nbits` bits per value. Exactly as many bytes as necessary are read
 /// from `d` in order to fill the slice `f` entirely. The actual number
-/// of bytes read from `d` is returned. `None` is returned if any of the
+/// of bytes read from `d` is returned. An error is returned if any of the
 /// following happens:
 /// 
 ///  - Source buffer is not large enough.
@@ -39,11 +145,18 @@ pub fn trim_i8_encode(f: &[i8], nbits: u32, d: &mut [u8]) -> usize {
 /// 
 /// The number of bits per coefficient (nbits) MUST lie between 2 and 8
 /// (inclusive).
-pub fn trim_i8_decode(d: &[u8], f: &mut [i8], nbits: u32) -> Option<usize> {
+pub fn trim_i8_decode(
+    d: &[u8],
+    f: &mut [i8],
+    nbits: u32,
+) -> Result<usize, CodecError> {
     let n = f.len();
-    let needed = ((n * (nbits as usize)) + 7) >> 3;
+    let needed = trim_i8_size(n, nbits)?;
     if d.len() < needed {
-        return None;
+        return Err(CodecError::SourceTooShort {
+            needed,
+            actual: d.len(),
+        });
     }
     let mut j = 0;
     let mut acc = 0;
@@ -58,7 +171,7 @@ pub fn trim_i8_decode(d: &[u8], f: &mut [i8], nbits: u32) -> Option<usize> {
             let w = (acc >> acc_len) & mask1;
             let w = w | (w & mask2).wrapping_neg();
             if w == mask2.wrapping_neg() {
-                return None;
+                return Err(CodecError::InvalidEncoding);
             }
             f[j] = w as i8;
             j += 1;
@@ -69,9 +182,9 @@ pub fn trim_i8_decode(d: &[u8], f: &mut [i8], nbits: u32) -> Option<usize> {
     }
     if (acc & ((1u32 << acc_len) - 1)) != 0 {
         // Some of the extra bits are non-zero.
-        return None;
+        return Err(CodecError::InvalidEncoding);
     }
-    Some(needed)
+    Ok(needed)
 }
 
 /// Encode integers modulo 12289 into bytes, with 14 bits per value.
@@ -80,19 +193,28 @@ pub fn trim_i8_decode(d: &[u8], f: &mut [i8], nbits: u32) -> Option<usize> {
 /// destination buffer `d`. Exactly 14 bits are used for each value.
 /// The values MUST be in the `[0,q-1]` range. The number of source values
 /// MUST be a multiple of 4.
-pub fn modq_encode(h: &[u16], d: &mut [u8]) -> usize {
-    assert!((h.len() & 3) == 0);
+pub fn modq_encode(h: &[u16], d: &mut [u8]) -> Result<usize, CodecError> {
+    let needed = modq_size(h.len())?;
+    if d.len() < needed {
+        return Err(CodecError::DestinationTooShort {
+            needed,
+            actual: d.len(),
+        });
+    }
     let mut j = 0;
     for i in 0..(h.len() >> 2) {
         let x0 = h[4 * i + 0] as u64;
         let x1 = h[4 * i + 1] as u64;
         let x2 = h[4 * i + 2] as u64;
         let x3 = h[4 * i + 3] as u64;
+        if x0 >= 12289 || x1 >= 12289 || x2 >= 12289 || x3 >= 12289 {
+            return Err(CodecError::CoefficientOutOfRange);
+        }
         let x = (x0 << 42) | (x1 << 28) | (x2 << 14) | x3;
         d[j..(j + 7)].copy_from_slice(&x.to_be_bytes()[1..8]);
         j += 7;
     }
-    j
+    Ok(j)
 }
 
 /// Decode integers modulo 12289 from bytes, with 14 bits per value.
@@ -102,16 +224,18 @@ pub fn modq_encode(h: &[u16], d: &mut [u8]) -> usize {
 /// the destination slice `h`. The number of elements in `h` MUST be a
 /// multiple of 4. The total number of read bytes is returned. If the
 /// source is too short, of if any of the decoded values is invalid (i.e.
-/// not in the `[0,q-1]` range), then this function returns `None`.
-pub fn modq_decode(d: &[u8], h: &mut [u16]) -> Option<usize> {
+/// not in the `[0,q-1]` range), then this function returns an error.
+pub fn modq_decode(d: &[u8], h: &mut [u16]) -> Result<usize, CodecError> {
     let n = h.len();
-    if n == 0 {
-        return Some(0);
-    }
-    assert!((n & 3) == 0);
-    let needed = 7 * (n >> 2);
+    let needed = modq_size(n)?;
     if d.len() != needed {
-        return None;
+        return Err(CodecError::SourceLengthMismatch {
+            expected: needed,
+            actual: d.len(),
+        });
+    }
+    if n == 0 {
+        return Ok(0);
     }
     let mut ov = 0xFFFF;
     let x = ((d[0] as u64) << 48)
@@ -150,20 +274,20 @@ pub fn modq_decode(d: &[u8], h: &mut [u16]) -> Option<usize> {
         h[4 * i + 3] = h3 as u16;
     }
     if (ov & 0x8000) == 0 {
-        return None;
+        return Err(CodecError::InvalidEncoding);
     }
-    Some(needed)
+    Ok(needed)
 }
 
 /// Encode small integers into bytes using a compressed (Golomb-Rice) format.
 ///
 /// Encode the provided source values `s` with compressed encoding. If
 /// any of the source values is larger than 2047 (in absolute value),
-/// then this function returns `false`. If the destination buffer `d` is
-/// not large enough, then this function returns `false`. Otherwise, all
+/// then this function returns an error. If the destination buffer `d` is
+/// not large enough, then this function returns an error. Otherwise, all
 /// output buffer bytes are set (padding bits/bytes of value zero are
-/// appended if necessary) and this function returns `true`.
-pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
+/// appended if necessary) and the number of payload bytes is returned.
+pub fn comp_encode(s: &[i16], d: &mut [u8]) -> Result<usize, CodecError> {
     let mut acc = 0;
     let mut acc_len = 0;
     let mut j = 0;
@@ -171,8 +295,8 @@ pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
         // Invariant: acc_len <= 7 at the beginning of each iteration.
 
         let x = s[i] as i32;
-        if x < -2047 || x > 2047 {
-            return false;
+        if !(-2047..=2047).contains(&x) {
+            return Err(CodecError::CoefficientOutOfRange);
         }
 
         // Get sign and absolute value.
@@ -198,7 +322,10 @@ pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
         while acc_len >= 8 {
             acc_len -= 8;
             if j >= d.len() {
-                return false;
+                return Err(CodecError::DestinationTooShort {
+                    needed: j + 1,
+                    actual: d.len(),
+                });
             }
             d[j] = (acc >> acc_len) as u8;
             j += 1;
@@ -208,7 +335,10 @@ pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
     // Flush remaining bits (if any).
     if acc_len > 0 {
         if j >= d.len() {
-            return false;
+            return Err(CodecError::DestinationTooShort {
+                needed: j + 1,
+                actual: d.len(),
+            });
         }
         d[j] = (acc << (8 - acc_len)) as u8;
         j += 1;
@@ -218,13 +348,13 @@ pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
     for k in j..d.len() {
         d[k] = 0;
     }
-    true
+    Ok(j)
 }
 
 /// Encode small integers from bytes using a compressed (Golomb-Rice) format.
 ///
 /// Decode the provided source buffer `d` into signed integers `v`, using
-/// the compressed encoding convention. This function returns `false` in
+/// the compressed encoding convention. This function returns an error in
 /// any of the following cases:
 ///
 ///  - Source does not contain enough encoded integers to fill `v` entirely.
@@ -235,7 +365,7 @@ pub fn comp_encode(s: &[i16], d: &mut [u8]) -> bool {
 /// Valid encodings cover exactly the integers in the `[-2047,+2047]` range.
 /// For a given sequence of integers, there is only one valid encoding as
 /// a sequence of bytes (of a given length).
-pub fn comp_decode(d: &[u8], v: &mut [i16]) -> bool {
+pub fn comp_decode(d: &[u8], v: &mut [i16]) -> Result<usize, CodecError> {
     let mut i = 0;
     let mut acc = 0;
     let mut acc_len = 0;
@@ -245,7 +375,10 @@ pub fn comp_decode(d: &[u8], v: &mut [i16]) -> bool {
         // Get next 8 bits and split them into sign bit (s) and low bits
         // of the absolute value (m).
         if i >= d.len() {
-            return false;
+            return Err(CodecError::SourceTooShort {
+                needed: i + 1,
+                actual: d.len(),
+            });
         }
         acc = (acc << 8) | (d[i] as u32);
         i += 1;
@@ -256,7 +389,10 @@ pub fn comp_decode(d: &[u8], v: &mut [i16]) -> bool {
         loop {
             if acc_len == 0 {
                 if i >= d.len() {
-                    return false;
+                    return Err(CodecError::SourceTooShort {
+                        needed: i + 1,
+                        actual: d.len(),
+                    });
                 }
                 acc = (acc << 8) | (d[i] as u32);
                 i += 1;
@@ -268,13 +404,13 @@ pub fn comp_decode(d: &[u8], v: &mut [i16]) -> bool {
             }
             m += 0x80;
             if m > 2047 {
-                return false;
+                return Err(CodecError::InvalidEncoding);
             }
         }
 
         // Reject "-0" (invalid encoding).
         if (s & (m.wrapping_sub(1) >> 31)) != 0 {
-            return false;
+            return Err(CodecError::InvalidEncoding);
         }
 
         // Apply the sign to get the value.
@@ -284,15 +420,72 @@ pub fn comp_decode(d: &[u8], v: &mut [i16]) -> bool {
     }
 
     // Check that unused bits are all zero.
-    if acc_len > 0 {
-        if (acc & ((1 << acc_len) - 1)) != 0 {
-            return false;
-        }
+    if acc_len > 0 && (acc & ((1 << acc_len) - 1)) != 0 {
+        return Err(CodecError::InvalidEncoding);
     }
     for k in i..d.len() {
         if d[k] != 0 {
-            return false;
+            return Err(CodecError::InvalidEncoding);
         }
     }
-    true
+    Ok(i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_i8_roundtrip() {
+        let src = [-31i8, -1, 0, 1, 31];
+        let mut enc = [0u8; 4];
+        let used = trim_i8_encode(&src, 6, &mut enc).unwrap();
+        assert_eq!(used, 4);
+        let mut dec = [0i8; 5];
+        let read = trim_i8_decode(&enc, &mut dec, 6).unwrap();
+        assert_eq!(read, 4);
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn trim_i8_rejects_invalid_source_values() {
+        let src = [-32i8];
+        let mut enc = [0u8; 1];
+        assert_eq!(
+            trim_i8_encode(&src, 6, &mut enc),
+            Err(CodecError::CoefficientOutOfRange),
+        );
+    }
+
+    #[test]
+    fn modq_roundtrip() {
+        let src = [0u16, 1, 12288, 7];
+        let mut enc = [0u8; 7];
+        let used = modq_encode(&src, &mut enc).unwrap();
+        assert_eq!(used, 7);
+        let mut dec = [0u16; 4];
+        let read = modq_decode(&enc, &mut dec).unwrap();
+        assert_eq!(read, 7);
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn comp_roundtrip() {
+        let src = [-2047i16, -1, 0, 1, 2047];
+        let mut enc = [0u8; 16];
+        let used = comp_encode(&src, &mut enc).unwrap();
+        let mut dec = [0i16; 5];
+        let read = comp_decode(&enc, &mut dec).unwrap();
+        assert_eq!(dec, src);
+        assert!(read <= used);
+    }
+
+    #[test]
+    fn comp_decode_rejects_non_zero_trailing_data() {
+        let src = [0i16];
+        let mut enc = [0u8; 3];
+        let used = comp_encode(&src, &mut enc).unwrap();
+        enc[used] = 1;
+        assert_eq!(comp_decode(&enc, &mut [0i16; 1]), Err(CodecError::InvalidEncoding));
+    }
 }

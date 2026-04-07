@@ -4,6 +4,8 @@
 //! key pair generation, signing, and verifying. It is not meant to
 //! be used directly.
 
+use core::fmt;
+
 /// Encoding/decoding primitives.
 pub mod codec;
 
@@ -27,9 +29,33 @@ pub const FN_DSA_LOGN_512: u32 = 9;
 /// Symbolic constant for FN-DSA with degree 1024 (`logn = 10`).
 pub const FN_DSA_LOGN_1024: u32 = 10;
 
-/// Get the size (in bytes) of a signing key for the provided degree
-/// (degree is `n = 2^logn`, with `2 <= logn <= 10`).
-pub const fn sign_key_size(logn: u32) -> usize {
+/// Error type for invalid degree parameters.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LogNError {
+    /// Supported degree parameters are in the `2..=10` range.
+    UnsupportedLogN { logn: u32 },
+}
+
+impl fmt::Display for LogNError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::UnsupportedLogN { logn } => {
+                write!(f, "unsupported degree parameter logn={logn}")
+            }
+        }
+    }
+}
+
+/// Validate a degree parameter.
+pub const fn check_logn(logn: u32) -> Result<(), LogNError> {
+    if logn < 2 || logn > 10 {
+        Err(LogNError::UnsupportedLogN { logn })
+    } else {
+        Ok(())
+    }
+}
+
+const fn sign_key_size_inner(logn: u32) -> usize {
     let n = 1usize << logn;
     let nbits_fg = match logn {
         2..=5 => 8,
@@ -40,15 +66,57 @@ pub const fn sign_key_size(logn: u32) -> usize {
     1 + (nbits_fg << (logn - 2)) + n
 }
 
-/// Get the size (in bytes) of a verifying key for the provided degree
+/// Signing key size for degree 512 (`logn = 9`).
+pub const SIGN_KEY_SIZE_512: usize = sign_key_size_inner(FN_DSA_LOGN_512);
+
+/// Signing key size for degree 1024 (`logn = 10`).
+pub const SIGN_KEY_SIZE_1024: usize = sign_key_size_inner(FN_DSA_LOGN_1024);
+
+/// Get the size (in bytes) of a signing key for the provided degree
 /// (degree is `n = 2^logn`, with `2 <= logn <= 10`).
-pub const fn vrfy_key_size(logn: u32) -> usize {
+pub const fn sign_key_size(logn: u32) -> Result<usize, LogNError> {
+    if let Err(err) = check_logn(logn) {
+        Err(err)
+    } else {
+        Ok(sign_key_size_inner(logn))
+    }
+}
+
+const fn vrfy_key_size_inner(logn: u32) -> usize {
     1 + (7 << (logn - 2))
 }
 
+/// Verifying key size for degree 512 (`logn = 9`).
+pub const VRFY_KEY_SIZE_512: usize = vrfy_key_size_inner(FN_DSA_LOGN_512);
+
+/// Verifying key size for degree 1024 (`logn = 10`).
+pub const VRFY_KEY_SIZE_1024: usize = vrfy_key_size_inner(FN_DSA_LOGN_1024);
+
+/// Get the size (in bytes) of a verifying key for the provided degree
+/// (degree is `n = 2^logn`, with `2 <= logn <= 10`).
+pub const fn vrfy_key_size(logn: u32) -> Result<usize, LogNError> {
+    if let Err(err) = check_logn(logn) {
+        Err(err)
+    } else {
+        Ok(vrfy_key_size_inner(logn))
+    }
+}
+
+const fn signature_size_inner(logn: u32) -> usize {
+    44 + 3 * (256 >> (10 - logn)) + 2 * (128 >> (10 - logn))
+        + 3 * (64 >> (10 - logn)) + 2 * (16 >> (10 - logn))
+        - 2 * (2 >> (10 - logn)) - 8 * (1 >> (10 - logn))
+}
+
+/// Signature size for degree 512 (`logn = 9`).
+pub const SIGNATURE_SIZE_512: usize = signature_size_inner(FN_DSA_LOGN_512);
+
+/// Signature size for degree 1024 (`logn = 10`).
+pub const SIGNATURE_SIZE_1024: usize = signature_size_inner(FN_DSA_LOGN_1024);
+
 /// Get the size (in bytes) of a signature for the provided degree
 /// (degree is `n = 2^logn`, with `2 <= logn <= 10`).
-pub const fn signature_size(logn: u32) -> usize {
+pub const fn signature_size(logn: u32) -> Result<usize, LogNError> {
     // logn   n      size
     //   2      4      47
     //   3      8      52
@@ -59,17 +127,98 @@ pub const fn signature_size(logn: u32) -> usize {
     //   8    256     356
     //   9    512     666
     //  10   1024    1280
-    44 + 3 * (256 >> (10 - logn)) + 2 * (128 >> (10 - logn))
-        + 3 * (64 >> (10 - logn)) + 2 * (16 >> (10 - logn))
-        - 2 * (2 >> (10 - logn)) - 8 * (1 >> (10 - logn))
+    if let Err(err) = check_logn(logn) {
+        Err(err)
+    } else {
+        Ok(signature_size_inner(logn))
+    }
 }
+
+/// Falcon-compatible raw-message profile.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FalconProfile {
+    /// Standard Falcon/PQClean raw-message mode.
+    PqClean,
+
+    /// Tidecoin-specific Falcon-512 legacy compatibility mode.
+    TidecoinLegacyFalcon512,
+}
+
+impl fmt::Display for FalconProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::PqClean => write!(f, "FalconPqClean"),
+            Self::TidecoinLegacyFalcon512 => {
+                write!(f, "TidecoinLegacyFalcon512")
+            }
+        }
+    }
+}
+
+/// Falcon nonce length in bytes.
+pub const FALCON_NONCE_LEN: usize = 40;
+
+/// Maximum compressed-body length accepted by Tidecoin legacy Falcon-512.
+pub const TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX: usize = 647;
+
+/// Maximum total signature length accepted by Tidecoin legacy Falcon-512.
+pub const TIDECOIN_LEGACY_FALCON512_SIG_MAX: usize =
+    1 + FALCON_NONCE_LEN + TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX;
 
 /// The message for which a signature is to be generated or verified is
 /// pre-hashed by the caller and provided as a hash value along with
 /// an identifier of the used hash function. The identifier is normally
 /// an encoded ASN.1 OID. A special identifier is used for "raw" messages
 /// (i.e. not pre-hashed at all); it uses a single byte of value 0x00.
-pub struct HashIdentifier<'a>(pub &'a [u8]);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HashIdentifier<'a>(&'a [u8]);
+
+/// Error type for hash identifiers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HashIdentifierError {
+    /// Hash identifiers must not be empty.
+    Empty,
+
+    /// One-byte identifiers are reserved for internal special values.
+    InvalidSingleByteValue { actual: u8 },
+}
+
+impl fmt::Display for HashIdentifierError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Empty => write!(f, "hash identifier must not be empty"),
+            Self::InvalidSingleByteValue { actual } => write!(
+                f,
+                "invalid one-byte hash identifier value: 0x{actual:02X}"
+            ),
+        }
+    }
+}
+
+impl<'a> HashIdentifier<'a> {
+    /// Create a validated hash identifier.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, HashIdentifierError> {
+        if bytes.is_empty() {
+            return Err(HashIdentifierError::Empty);
+        }
+        if bytes.len() == 1 && bytes[0] != 0x00 {
+            return Err(HashIdentifierError::InvalidSingleByteValue {
+                actual: bytes[0],
+            });
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Get the raw identifier bytes.
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
+    }
+
+    /// Test whether this is the raw-message identifier.
+    pub const fn is_raw(&self) -> bool {
+        self.0.len() == 1 && self.0[0] == 0x00
+    }
+}
 
 /// Hash function identifier: none.
 ///
@@ -77,21 +226,6 @@ pub struct HashIdentifier<'a>(pub &'a [u8]);
 /// generation and verification are performed over a raw message, without
 /// pre-hashing.
 pub const HASH_ID_RAW: HashIdentifier = HashIdentifier(&[0x00]);
-
-/// Hash function identifier: original Falcon design.
-///
-/// This identifier modifies processing of the input so that it follows
-/// the Falcon scheme as it was submitted for round 3 of the post-quantum
-/// cryptography standardization process. When this identifier is used:
-///
-///  - The message is raw (not pre-hashed).
-///  - The domain separation context is not used.
-///  - The public key hash is not included in the signed data.
-///
-/// Supporting the original Falcon design is an obsolescent feature
-/// that will be removed at the latest when the final FN-DSA standard
-/// is published.
-pub const HASH_ID_ORIGINAL_FALCON: HashIdentifier = HashIdentifier(&[0xFF]);
 
 /// Hash function identifier: SHA-256
 pub const HASH_ID_SHA256: HashIdentifier = HashIdentifier(
@@ -132,10 +266,85 @@ pub const HASH_ID_SHAKE256: HashIdentifier = HashIdentifier(
 /// When a message is signed or verified, it is accompanied with a domain
 /// separation context, which is an arbitrary sequence of bytes of length
 /// at most 255. Such a context is wrapped in a `DomainContext` structure.
-pub struct DomainContext<'a>(pub &'a [u8]);
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DomainContext<'a>(&'a [u8]);
+
+/// Error type for domain-separation contexts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DomainContextError {
+    /// Domain-separation contexts are limited to 255 bytes.
+    Oversized { actual: usize },
+}
+
+impl fmt::Display for DomainContextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Oversized { actual } => write!(
+                f,
+                "invalid domain context length: expected at most 255 bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl<'a> DomainContext<'a> {
+    /// Create a validated domain-separation context.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, DomainContextError> {
+        if bytes.len() > 255 {
+            return Err(DomainContextError::Oversized {
+                actual: bytes.len(),
+            });
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Create an empty domain-separation context.
+    pub const fn empty() -> Self {
+        Self(b"")
+    }
+
+    /// Get the raw bytes for this context.
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.0
+    }
+
+    /// Test whether the context is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Get the context length in bytes.
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// Empty domain separation context.
-pub const DOMAIN_NONE: DomainContext = DomainContext(b"");
+pub const DOMAIN_NONE: DomainContext = DomainContext::empty();
+
+/// Error type for message hashing into a point.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HashToPointError {
+    /// The nonce must contain exactly 40 bytes.
+    InvalidNonceLength { actual: usize },
+
+    /// The hashed verifying key must contain exactly 64 bytes.
+    InvalidHashedVerifyingKeyLength { actual: usize },
+}
+
+impl fmt::Display for HashToPointError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InvalidNonceLength { actual } => {
+                write!(f, "invalid nonce length: expected 40 bytes, got {actual}")
+            }
+            Self::InvalidHashedVerifyingKeyLength { actual } => write!(
+                f,
+                "invalid hashed verifying key length: expected 64 bytes, got {actual}"
+            ),
+        }
+    }
+}
 
 /// Hash a message into a polynomial modulo q = 12289.
 ///
@@ -153,13 +362,49 @@ pub const DOMAIN_NONE: DomainContext = DomainContext(b"");
 /// for applying the pre-hashing, and `hv` shall be the hashed message.
 pub fn hash_to_point(nonce: &[u8], hashed_vrfy_key: &[u8],
     ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], c: &mut [u16])
+    -> Result<(), HashToPointError>
 {
-    // TODO: remove support for original Falcon when the final FN-DSA
-    // is defined and has test vectors. Since the message is used "as is",
-    // this encoding can mimic all others, and thus bypasses any attempt at
-    // domain separation. Moreover, ignoring the domain separation context
-    // is a potential source of security issues, since the caller might
-    // expect a strong binding to the context value.
+    if nonce.len() != FALCON_NONCE_LEN {
+        return Err(HashToPointError::InvalidNonceLength {
+            actual: nonce.len(),
+        });
+    }
+    if hashed_vrfy_key.len() != 64 {
+        return Err(HashToPointError::InvalidHashedVerifyingKeyLength {
+            actual: hashed_vrfy_key.len(),
+        });
+    }
+    hash_to_point_inner(nonce, hashed_vrfy_key, ctx, id, hv, c);
+    Ok(())
+}
+
+/// Hash a raw Falcon/PQClean message into a polynomial modulo q = 12289.
+///
+/// Parameters are:
+///
+///  - `nonce`:    40-byte random nonce
+///  - `message`:  raw message bytes
+///  - `c`:        output polynomial
+pub fn hash_to_point_falcon(
+    nonce: &[u8],
+    message: &[u8],
+    c: &mut [u16],
+) -> Result<(), HashToPointError> {
+    if nonce.len() != FALCON_NONCE_LEN {
+        return Err(HashToPointError::InvalidNonceLength {
+            actual: nonce.len(),
+        });
+    }
+    hash_to_point_falcon_inner(nonce, message, c);
+    Ok(())
+}
+
+fn hash_to_point_inner(nonce: &[u8], hashed_vrfy_key: &[u8],
+    ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], c: &mut [u16])
+{
+    debug_assert!(ctx.len() <= 255);
+    debug_assert!(!id.as_bytes().is_empty());
+    debug_assert!(id.as_bytes().len() != 1 || id.is_raw());
 
     // Input order:
     //   With pre-hashing:
@@ -167,31 +412,42 @@ pub fn hash_to_point(nonce: &[u8], hashed_vrfy_key: &[u8],
     //   Without pre-hashing:
     //     nonce || hashed_vrfy_key || 0x00 || len(ctx) || ctx || message
     // 'len(ctx)' is the length of the context over one byte (0 to 255).
-
-    assert!(nonce.len() == 40);
-    assert!(hashed_vrfy_key.len() == 64);
-    assert!(ctx.0.len() <= 255);
-    let orig_falcon = id.0.len() == 1 && id.0[0] == 0xFF;
-    let raw_message = id.0.len() == 1 && id.0[0] == 0x00;
+    let raw_message = id.is_raw();
     let mut sh = shake::SHAKE256::new();
-    sh.inject(nonce);
-    if orig_falcon {
-        sh.inject(hv);
-    } else {
-        sh.inject(hashed_vrfy_key);
-        sh.inject(&[if raw_message { 0u8 } else { 1u8 }]);
-        sh.inject(&[ctx.0.len() as u8]);
-        sh.inject(ctx.0);
-        if !raw_message {
-            sh.inject(id.0);
-        }
-        sh.inject(hv);
+    sh.inject(nonce).unwrap();
+    sh.inject(hashed_vrfy_key).unwrap();
+    sh.inject(&[if raw_message { 0u8 } else { 1u8 }]).unwrap();
+    sh.inject(&[ctx.len() as u8]).unwrap();
+    sh.inject(ctx.as_bytes()).unwrap();
+    if !raw_message {
+        sh.inject(id.as_bytes()).unwrap();
     }
-    sh.flip();
+    sh.inject(hv).unwrap();
+    sh.flip().unwrap();
     let mut i = 0;
     while i < c.len() {
         let mut v = [0u8; 2];
-        sh.extract(&mut v);
+        sh.extract(&mut v).unwrap();
+        let mut w = ((v[0] as u16) << 8) | (v[1] as u16);
+        if w < 61445 {
+            while w >= 12289 {
+                w -= 12289;
+            }
+            c[i] = w;
+            i += 1;
+        }
+    }
+}
+
+fn hash_to_point_falcon_inner(nonce: &[u8], message: &[u8], c: &mut [u16]) {
+    let mut sh = shake::SHAKE256::new();
+    sh.inject(nonce).unwrap();
+    sh.inject(message).unwrap();
+    sh.flip().unwrap();
+    let mut i = 0;
+    while i < c.len() {
+        let mut v = [0u8; 2];
+        sh.extract(&mut v).unwrap();
         let mut w = ((v[0] as u16) << 8) | (v[1] as u16);
         if w < 61445 {
             while w >= 12289 {

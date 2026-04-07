@@ -1,6 +1,14 @@
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::excessive_precision)]
+#![allow(clippy::len_zero)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::redundant_field_names)]
+#![allow(clippy::too_many_arguments)]
 
 //! # FN-DSA signature generation
 //!
@@ -46,33 +54,68 @@
 //!
 //! ## Example usage
 //!
-//! ```ignore
-//! use rand_core::OsRng;
+//! ```no_run
 //! use fn_dsa_sign::{
-//!     sign_key_size, signature_size, FN_DSA_LOGN_512,
+//!     SIGN_KEY_SIZE_512, SIGNATURE_SIZE_512, FN_DSA_LOGN_512,
 //!     SigningKey, SigningKeyStandard,
-//!     DOMAIN_NONE, HASH_ID_RAW,
+//!     DOMAIN_NONE, HASH_ID_RAW, CryptoRng, RngCore, RngError,
 //! };
+//! #
+//! # struct DemoRng(u64);
+//! # impl CryptoRng for DemoRng {}
+//! # impl RngCore for DemoRng {
+//! #     fn next_u32(&mut self) -> u32 {
+//! #         let x = self.0 as u32;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn next_u64(&mut self) -> u64 {
+//! #         let x = self.0;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn fill_bytes(&mut self, dest: &mut [u8]) {
+//! #         for chunk in dest.chunks_mut(8) {
+//! #             let bytes = self.next_u64().to_le_bytes();
+//! #             let len = chunk.len();
+//! #             chunk.copy_from_slice(&bytes[..len]);
+//! #         }
+//! #     }
+//! #     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+//! #         self.fill_bytes(dest);
+//! #         Ok(())
+//! #     }
+//! # }
 //! 
-//! let mut sk = SigningKeyStandard::decode(encoded_signing_key)?;
-//! let mut sig = vec![0u8; signature_size(sk.get_logn())];
-//! sk.sign(&mut OsRng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig);
+//! let encoded_signing_key = [0u8; SIGN_KEY_SIZE_512];
+//! let mut sk = SigningKeyStandard::decode(&encoded_signing_key)
+//!     .expect("valid signing key bytes");
+//! let mut sig = [0u8; SIGNATURE_SIZE_512];
+//! let mut rng = DemoRng(1);
+//! sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig)
+//!     .unwrap();
 //! ```
 
 mod flr;
 mod poly;
 mod sampler;
 
-use fn_dsa_comm::{codec, hash_to_point, mq, shake, PRNG};
+use core::fmt;
+use fn_dsa_comm::{codec, hash_to_point, hash_to_point_falcon, mq, shake, PRNG};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Re-export useful types, constants and functions.
 pub use fn_dsa_comm::{
     sign_key_size, vrfy_key_size, signature_size,
     FN_DSA_LOGN_512, FN_DSA_LOGN_1024,
+    SIGN_KEY_SIZE_512, SIGN_KEY_SIZE_1024,
+    VRFY_KEY_SIZE_512, VRFY_KEY_SIZE_1024,
+    SIGNATURE_SIZE_512, SIGNATURE_SIZE_1024,
+    FalconProfile,
+    FALCON_NONCE_LEN,
+    TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX,
     HashIdentifier,
     HASH_ID_RAW,
-    HASH_ID_ORIGINAL_FALCON,
     HASH_ID_SHA256,
     HASH_ID_SHA384,
     HASH_ID_SHA512,
@@ -86,6 +129,45 @@ pub use fn_dsa_comm::{
     DOMAIN_NONE,
     CryptoRng, RngCore, RngError,
 };
+
+/// Error type for signing-key operations with caller-supplied buffers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SigningKeyError {
+    /// The destination buffer for the verifying key has the wrong size.
+    InvalidVerifyingKeyBufferLen { expected: usize, actual: usize },
+
+    /// The destination buffer for the signature has the wrong size.
+    InvalidSignatureBufferLen { expected: usize, actual: usize },
+
+    /// The destination buffer for a variable-length Falcon signature is too short.
+    InvalidSignatureBufferLenAtLeast { min: usize, actual: usize },
+
+    /// The selected Falcon profile does not support the key degree.
+    UnsupportedFalconProfileForDegree { profile: FalconProfile, logn: u32 },
+}
+
+impl fmt::Display for SigningKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InvalidVerifyingKeyBufferLen { expected, actual } => write!(
+                f,
+                "invalid verifying key buffer length: expected {expected} bytes, got {actual}"
+            ),
+            Self::InvalidSignatureBufferLen { expected, actual } => write!(
+                f,
+                "invalid signature buffer length: expected {expected} bytes, got {actual}"
+            ),
+            Self::InvalidSignatureBufferLenAtLeast { min, actual } => write!(
+                f,
+                "invalid signature buffer length: expected at least {min} bytes, got {actual}"
+            ),
+            Self::UnsupportedFalconProfileForDegree { profile, logn } => write!(
+                f,
+                "falcon profile {profile} does not support degree parameter logn={logn}"
+            ),
+        }
+    }
+}
 
 /// Signing key handler and temporary buffers.
 ///
@@ -116,7 +198,8 @@ pub trait SigningKey: Sized {
     /// Encode the public (verifying) key into the provided buffer.
     ///
     /// The output buffer must have the exact size of the verifying key.
-    fn to_verifying_key(&self, vrfy_key: &mut [u8]);
+    fn to_verifying_key(&self, vrfy_key: &mut [u8])
+        -> Result<(), SigningKeyError>;
 
     /// Generate a signature.
     ///
@@ -131,11 +214,19 @@ pub trait SigningKey: Sized {
     ///    MUST be exactly that expected for the key degree (see
     ///    `signature_size()`).
     fn sign<T: CryptoRng + RngCore>(&mut self, rng: &mut T,
-        ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], sig: &mut [u8]);
+        ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], sig: &mut [u8])
+        -> Result<(), SigningKeyError>;
+
+    /// Generate a raw-message Falcon-compatible signature.
+    ///
+    /// The returned value is the number of bytes written to `sig`.
+    fn sign_falcon<T: CryptoRng + RngCore>(&mut self, rng: &mut T,
+        profile: FalconProfile, message: &[u8], sig: &mut [u8])
+        -> Result<usize, SigningKeyError>;
 }
 
 macro_rules! sign_key_impl {
-    ($typename:ident, $logn_min:expr, $logn_max:expr) =>
+    ($typename:ident, $logn_min:expr_2021, $logn_max:expr_2021) =>
 {
     #[doc = concat!("Signature generator for degrees (`logn`) ",
         stringify!($logn_min), " to ", stringify!($logn_max), " only.")]
@@ -145,7 +236,7 @@ macro_rules! sign_key_impl {
         g: [i8; 1 << ($logn_max)],
         F: [i8; 1 << ($logn_max)],
         G: [i8; 1 << ($logn_max)],
-        vrfy_key: [u8; vrfy_key_size($logn_max)],
+        vrfy_key: [u8; 1 + (7 << (($logn_max) - 2))],
         hashed_vrfy_key: [u8; 64],
         tmp_i16: [i16; 1 << ($logn_max)],
         tmp_u16: [u16; 2 << ($logn_max)],
@@ -213,7 +304,7 @@ macro_rules! sign_key_impl {
             let g = [0i8; 1 << ($logn_max)];
             let F = [0i8; 1 << ($logn_max)];
             let G = [0i8; 1 << ($logn_max)];
-            let vrfy_key = [0u8; vrfy_key_size($logn_max)];
+            let vrfy_key = [0u8; 1 + (7 << (($logn_max) - 2))];
             let hashed_vrfy_key = [0u8; 64];
             let tmp_i16 = [0i16; 1 << ($logn_max)];
             let tmp_u16 = [0u16; 2 << ($logn_max)];
@@ -243,16 +334,32 @@ macro_rules! sign_key_impl {
             self.logn
         }
 
-        fn to_verifying_key(&self, vrfy_key: &mut [u8]) {
-            let len = vrfy_key_size(self.logn);
-            assert!(vrfy_key.len() == len);
+        fn to_verifying_key(&self, vrfy_key: &mut [u8])
+            -> Result<(), SigningKeyError>
+        {
+            let len = vrfy_key_size(self.logn).unwrap();
+            if vrfy_key.len() != len {
+                return Err(SigningKeyError::InvalidVerifyingKeyBufferLen {
+                    expected: len,
+                    actual: vrfy_key.len(),
+                });
+            }
             vrfy_key.copy_from_slice(&self.vrfy_key[..len]);
+            Ok(())
         }
 
         fn sign<T: CryptoRng + RngCore>(&mut self, rng: &mut T,
             ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], sig: &mut [u8])
+            -> Result<(), SigningKeyError>
         {
             let n = 1usize << self.logn;
+            let expected_len = signature_size(self.logn).unwrap();
+            if sig.len() != expected_len {
+                return Err(SigningKeyError::InvalidSignatureBufferLen {
+                    expected: expected_len,
+                    actual: sig.len(),
+                });
+            }
 
             #[cfg(all(not(feature = "no_avx2"), target_arch = "x86_64"))]
             if self.use_avx2 {
@@ -265,7 +372,7 @@ macro_rules! sign_key_impl {
                         #[cfg(not(feature = "small_context"))]
                         &self.basis[..(4 * n)],
                         &mut self.tmp_i16, &mut self.tmp_u16,
-                        &mut self.tmp_flr);
+                        &mut self.tmp_flr)?;
 
                     #[cfg(not(feature = "shake256x4"))]
                     sign_avx2::sign_avx2_inner::<T, shake::SHAKE256_PRNG>(
@@ -275,9 +382,9 @@ macro_rules! sign_key_impl {
                         #[cfg(not(feature = "small_context"))]
                         &self.basis[..(4 * n)],
                         &mut self.tmp_i16, &mut self.tmp_u16,
-                        &mut self.tmp_flr);
+                        &mut self.tmp_flr)?;
                 }
-                return;
+                return Ok(());
             }
 
             #[cfg(feature = "shake256x4")]
@@ -286,7 +393,7 @@ macro_rules! sign_key_impl {
                 &self.hashed_vrfy_key, ctx, id, hv, sig,
                 #[cfg(not(feature = "small_context"))]
                 &self.basis[..(4 * n)],
-                &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr);
+                &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr)?;
 
             #[cfg(not(feature = "shake256x4"))]
             sign_inner::<T, shake::SHAKE256_PRNG>(self.logn, rng,
@@ -294,7 +401,63 @@ macro_rules! sign_key_impl {
                 &self.hashed_vrfy_key, ctx, id, hv, sig,
                 #[cfg(not(feature = "small_context"))]
                 &self.basis[..(4 * n)],
-                &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr);
+                &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr)?;
+            Ok(())
+        }
+
+        fn sign_falcon<T: CryptoRng + RngCore>(&mut self, rng: &mut T,
+            profile: FalconProfile, message: &[u8], sig: &mut [u8])
+            -> Result<usize, SigningKeyError>
+        {
+            let n = 1usize << self.logn;
+            #[cfg(all(not(feature = "no_avx2"), target_arch = "x86_64"))]
+            if self.use_avx2 {
+                unsafe {
+                    #[cfg(feature = "shake256x4")]
+                    return sign_avx2::sign_falcon_avx2_inner::<T, shake::SHAKE256x4>(
+                        profile, self.logn, rng,
+                        &self.f[..n], &self.g[..n], &self.F[..n], &self.G[..n],
+                        message, sig,
+                        #[cfg(not(feature = "small_context"))]
+                        &self.basis[..(4 * n)],
+                        &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr,
+                    );
+
+                    #[cfg(not(feature = "shake256x4"))]
+                    return sign_avx2::sign_falcon_avx2_inner::<T, shake::SHAKE256_PRNG>(
+                        profile, self.logn, rng,
+                        &self.f[..n], &self.g[..n], &self.F[..n], &self.G[..n],
+                        message, sig,
+                        #[cfg(not(feature = "small_context"))]
+                        &self.basis[..(4 * n)],
+                        &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr,
+                    );
+                }
+            }
+
+            #[cfg(feature = "shake256x4")]
+            {
+                sign_falcon_inner::<T, shake::SHAKE256x4>(
+                    profile, self.logn, rng,
+                    &self.f[..n], &self.g[..n], &self.F[..n], &self.G[..n],
+                    message, sig,
+                    #[cfg(not(feature = "small_context"))]
+                    &self.basis[..(4 * n)],
+                    &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr,
+                )
+            }
+
+            #[cfg(not(feature = "shake256x4"))]
+            {
+                sign_falcon_inner::<T, shake::SHAKE256_PRNG>(
+                    profile, self.logn, rng,
+                    &self.f[..n], &self.g[..n], &self.F[..n], &self.G[..n],
+                    message, sig,
+                    #[cfg(not(feature = "small_context"))]
+                    &self.basis[..(4 * n)],
+                    &mut self.tmp_i16, &mut self.tmp_u16, &mut self.tmp_flr,
+                )
+            }
         }
     }
 } }
@@ -334,7 +497,7 @@ fn decode_inner(logn_min: u32, logn_max: u32,
     if logn < logn_min || logn > logn_max {
         return None;
     }
-    if src.len() != sign_key_size(logn) {
+    if src.len() != sign_key_size(logn).unwrap() {
         return None;
     }
     let n = 1usize << logn;
@@ -342,13 +505,13 @@ fn decode_inner(logn_min: u32, logn_max: u32,
     assert!(g.len() >= n);
     assert!(F.len() >= n);
     assert!(G.len() >= n);
-    assert!(vrfy_key.len() >= vrfy_key_size(logn));
+    assert!(vrfy_key.len() >= vrfy_key_size(logn).unwrap());
     assert!(hashed_vrfy_key.len() == 64);
     let f = &mut f[..n];
     let g = &mut g[..n];
     let F = &mut F[..n];
     let G = &mut G[..n];
-    let vk = &mut vrfy_key[..vrfy_key_size(logn)];
+    let vk = &mut vrfy_key[..vrfy_key_size(logn).unwrap()];
 
     // Coefficients of (f,g) use a number of bits that depends on logn.
     let nbits_fg = match logn {
@@ -357,9 +520,9 @@ fn decode_inner(logn_min: u32, logn_max: u32,
         8..=9 => 6,
         _ => 5,
     };
-    let j = 1 + codec::trim_i8_decode(&src[1..], f, nbits_fg)?;
-    let j = j + codec::trim_i8_decode(&src[j..], g, nbits_fg)?;
-    let j = j + codec::trim_i8_decode(&src[j..], F, 8)?;
+    let j = 1 + codec::trim_i8_decode(&src[1..], f, nbits_fg).ok()?;
+    let j = j + codec::trim_i8_decode(&src[j..], g, nbits_fg).ok()?;
+    let j = j + codec::trim_i8_decode(&src[j..], F, 8).ok()?;
     // We already checked the length of src; any mismatch at this point
     // is an implementation bug.
     assert!(j == src.len());
@@ -394,12 +557,12 @@ fn decode_inner(logn_min: u32, logn_max: u32,
     mq::mqpoly_NTT_to_int(logn, w0);
     mq::mqpoly_int_to_ext(logn, w0);
     vk[0] = 0x00 + (logn as u8);
-    let j = 1 + codec::modq_encode(&w0[..n], &mut vk[1..]);
+    let j = 1 + codec::modq_encode(&w0[..n], &mut vk[1..]).unwrap();
     assert!(j == vk.len());
     let mut sh = shake::SHAKE256::new();
-    sh.inject(vk);
-    sh.flip();
-    sh.extract(hashed_vrfy_key);
+    sh.inject(vk).unwrap();
+    sh.flip().unwrap();
+    sh.extract(hashed_vrfy_key).unwrap();
 
     // Convert back G to external representation and check that all
     // elements are small.
@@ -438,28 +601,48 @@ fn compute_basis_inner(logn: u32,
 // 1/12289
 const INV_Q: flr::FLR = flr::FLR::scaled(6004310871091074, -66);
 
+fn falcon_profile_supports_logn(profile: FalconProfile, logn: u32) -> bool {
+    match profile {
+        FalconProfile::PqClean => logn == 9 || logn == 10,
+        FalconProfile::TidecoinLegacyFalcon512 => logn == 9,
+    }
+}
+
+fn falcon_profile_retry_uses_fresh_nonce(profile: FalconProfile) -> bool {
+    match profile {
+        FalconProfile::PqClean => true,
+        FalconProfile::TidecoinLegacyFalcon512 => false,
+    }
+}
+
+fn falcon_profile_sig_body_cap(profile: FalconProfile, total_sig_len: usize) -> usize {
+    let cap = total_sig_len.saturating_sub(1 + FALCON_NONCE_LEN);
+    match profile {
+        FalconProfile::PqClean => cap,
+        FalconProfile::TidecoinLegacyFalcon512 => {
+            core::cmp::min(cap, TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX)
+        }
+    }
+}
+
 fn sign_inner<T: CryptoRng + RngCore, P: PRNG>(logn: u32, rng: &mut T,
     f: &[i8], g: &[i8], F: &[i8], G: &[i8], hashed_vrfy_key: &[u8],
     ctx: &DomainContext, id: &HashIdentifier, hv: &[u8], sig: &mut [u8],
     #[cfg(not(feature = "small_context"))]
     basis: &[flr::FLR],
     tmp_i16: &mut [i16], tmp_u16: &mut [u16], tmp_flr: &mut [flr::FLR])
+    -> Result<(), SigningKeyError>
 {
     let n = 1usize << logn;
     assert!(f.len() == n);
     assert!(g.len() == n);
     assert!(F.len() == n);
     assert!(G.len() == n);
-    assert!(sig.len() == signature_size(logn));
-
-    // Special behaviour for the original Falcon algorithm (for test
-    // reproducibility). TODO: remove when switching to final test vectors.
-    let orig_falcon = id.0.len() == 1 && id.0[0] == 0xFF;
+    assert!(sig.len() == signature_size(logn).unwrap());
 
     // Hash the message with a 40-byte random nonce, to produce the
     // hashed message.
     let mut nonce = [0u8; 40];
-    let mut first = true;
 
     // Usually the signature generation works at the first attempt, but
     // occasionally we need to try again because the obtained signature
@@ -467,15 +650,9 @@ fn sign_inner<T: CryptoRng + RngCore, P: PRNG>(logn: u32, rng: &mut T,
     // signature size.
     loop {
         let hm = &mut tmp_u16[0..n];
-        // We must generate a random 40-byte nonce, and hash the
-        // message to a polynomial hm[].
-        // In the original Falcon, this was done once; in FN-DSA, this
-        // is done at each loop restart.
-        // (TODO: align with final spec)
-        if first || !orig_falcon {
-            rng.fill_bytes(&mut nonce);
-            hash_to_point(&nonce, hashed_vrfy_key, ctx, id, hv, hm);
-            first = false;
+        rng.fill_bytes(&mut nonce);
+        if hash_to_point(&nonce, hashed_vrfy_key, ctx, id, hv, hm).is_err() {
+            unreachable!();
         }
 
         // We initialize the PRNG with a 56-byte seed, to match the
@@ -694,10 +871,208 @@ fn sign_inner<T: CryptoRng + RngCore, P: PRNG>(logn: u32, rng: &mut T,
         // We have a candidate signature; we must encode it. This may
         // fail, since encoding is variable-size and might not fit in the
         // target size.
-        if codec::comp_encode(s2, &mut sig[41..]) {
+        if codec::comp_encode(s2, &mut sig[41..]).is_ok() {
             sig[0] = 0x30 + (logn as u8);
             sig[1..41].copy_from_slice(&nonce);
-            return;
+            return Ok(());
+        }
+    }
+}
+
+fn sign_falcon_inner<T: CryptoRng + RngCore, P: PRNG>(
+    profile: FalconProfile,
+    logn: u32,
+    rng: &mut T,
+    f: &[i8],
+    g: &[i8],
+    F: &[i8],
+    G: &[i8],
+    message: &[u8],
+    sig: &mut [u8],
+    #[cfg(not(feature = "small_context"))]
+    basis: &[flr::FLR],
+    tmp_i16: &mut [i16],
+    tmp_u16: &mut [u16],
+    tmp_flr: &mut [flr::FLR],
+) -> Result<usize, SigningKeyError> {
+    let n = 1usize << logn;
+    assert!(f.len() == n);
+    assert!(g.len() == n);
+    assert!(F.len() == n);
+    assert!(G.len() == n);
+    if !falcon_profile_supports_logn(profile, logn) {
+        return Err(SigningKeyError::UnsupportedFalconProfileForDegree { profile, logn });
+    }
+    let min_len = 1 + FALCON_NONCE_LEN + 1;
+    if sig.len() < min_len {
+        return Err(SigningKeyError::InvalidSignatureBufferLenAtLeast {
+            min: min_len,
+            actual: sig.len(),
+        });
+    }
+
+    let mut nonce = [0u8; FALCON_NONCE_LEN];
+    let mut first = true;
+    loop {
+        let hm = &mut tmp_u16[0..n];
+        if first || falcon_profile_retry_uses_fresh_nonce(profile) {
+            rng.fill_bytes(&mut nonce);
+            hash_to_point_falcon(&nonce, message, hm).unwrap();
+            first = false;
+        }
+
+        let mut seed = [0u8; 56];
+        rng.fill_bytes(&mut seed);
+        let mut samp = sampler::Sampler::<P>::new(logn, &seed);
+
+        #[cfg(feature = "small_context")]
+        {
+            compute_basis_inner(logn, f, g, F, G, tmp_flr);
+
+            let (b00, work) = tmp_flr.split_at_mut(n);
+            let (b01, work) = work.split_at_mut(n);
+            let (b10, work) = work.split_at_mut(n);
+            let (b11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            t0.copy_from_slice(&*b01);
+            poly::poly_mulownadj_fft(logn, t0);
+            t1.copy_from_slice(&*b00);
+            poly::poly_muladj_fft(logn, t1, b10);
+            poly::poly_mulownadj_fft(logn, b00);
+            poly::poly_add(logn, b00, t0);
+            t0.copy_from_slice(b01);
+            poly::poly_muladj_fft(logn, b01, b11);
+            poly::poly_add(logn, b01, t1);
+            poly::poly_mulownadj_fft(logn, b10);
+            t1.copy_from_slice(b11);
+            poly::poly_mulownadj_fft(logn, t1);
+            poly::poly_add(logn, b10, t1);
+        }
+
+        #[cfg(not(feature = "small_context"))]
+        {
+            let (b00, work) = basis.split_at(n);
+            let (b01, work) = work.split_at(n);
+            let (b10, work) = work.split_at(n);
+            let (b11, _) = work.split_at(n);
+
+            let (g00, work) = tmp_flr.split_at_mut(n);
+            let (g01, work) = work.split_at_mut(n);
+            let (g11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            g00.copy_from_slice(b00);
+            poly::poly_mulownadj_fft(logn, g00);
+            t0.copy_from_slice(b01);
+            poly::poly_mulownadj_fft(logn, t0);
+            poly::poly_add(logn, g00, t0);
+
+            g01.copy_from_slice(b00);
+            poly::poly_muladj_fft(logn, g01, b10);
+            t0.copy_from_slice(b01);
+            poly::poly_muladj_fft(logn, t0, b11);
+            poly::poly_add(logn, g01, t0);
+
+            g11.copy_from_slice(b10);
+            poly::poly_mulownadj_fft(logn, g11);
+            t0.copy_from_slice(b11);
+            poly::poly_mulownadj_fft(logn, t0);
+            poly::poly_add(logn, g11, t0);
+
+            t0.copy_from_slice(b11);
+            t1.copy_from_slice(b01);
+        }
+
+        {
+            let (_, work) = tmp_flr.split_at_mut(3 * n);
+            let (b11, work) = work.split_at_mut(n);
+            let (b01, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            for i in 0..n {
+                t0[i] = flr::FLR::from_i32(hm[i] as i32);
+            }
+            poly::FFT(logn, t0);
+            t1.copy_from_slice(t0);
+            poly::poly_mul_fft(logn, t1, b01);
+            poly::poly_mulconst(logn, t1, -INV_Q);
+            poly::poly_mul_fft(logn, t0, b11);
+            poly::poly_mulconst(logn, t0, INV_Q);
+        }
+
+        tmp_flr.copy_within((5 * n)..(7 * n), 3 * n);
+
+        {
+            let (g00, work) = tmp_flr.split_at_mut(n);
+            let (g01, work) = work.split_at_mut(n);
+            let (g11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, work) = work.split_at_mut(n);
+            samp.ffsamp_fft(t0, t1, g00, g01, g11, work);
+        }
+
+        tmp_flr.copy_within((3 * n)..(5 * n), 4 * n);
+
+        #[cfg(feature = "small_context")]
+        compute_basis_inner(logn, f, g, F, G, tmp_flr);
+
+        #[cfg(not(feature = "small_context"))]
+        tmp_flr[..(4 * n)].copy_from_slice(&basis[..(4 * n)]);
+
+        let (b00, work) = tmp_flr.split_at_mut(n);
+        let (b01, work) = work.split_at_mut(n);
+        let (b10, work) = work.split_at_mut(n);
+        let (b11, work) = work.split_at_mut(n);
+        let (t0, work) = work.split_at_mut(n);
+        let (t1, work) = work.split_at_mut(n);
+        let (tx, work) = work.split_at_mut(n);
+        let (ty, _) = work.split_at_mut(n);
+
+        tx.copy_from_slice(t0);
+        ty.copy_from_slice(t1);
+        poly::poly_mul_fft(logn, tx, b00);
+        poly::poly_mul_fft(logn, ty, b10);
+        poly::poly_add(logn, tx, ty);
+        ty.copy_from_slice(t0);
+        poly::poly_mul_fft(logn, ty, b01);
+        t0.copy_from_slice(tx);
+        poly::poly_mul_fft(logn, t1, b11);
+        poly::poly_add(logn, t1, ty);
+        poly::iFFT(logn, t0);
+        poly::iFFT(logn, t1);
+
+        let mut sqn = 0u32;
+        let mut ng = 0;
+        for i in 0..n {
+            let z = (hm[i] as i32) - (t0[i].rint() as i32);
+            let z = (z as i16) as i32;
+            sqn = sqn.wrapping_add((z * z) as u32);
+            ng |= sqn;
+        }
+
+        let s2 = &mut tmp_i16[..n];
+        for i in 0..n {
+            let sz = (-t1[i].rint()) as i16;
+            let z = sz as i32;
+            sqn = sqn.wrapping_add((z * z) as u32);
+            ng |= sqn;
+            s2[i] = sz;
+        }
+
+        sqn |= ((ng as i32) >> 31) as u32;
+        if sqn > mq::SQBETA[logn as usize] {
+            continue;
+        }
+
+        let body_cap = falcon_profile_sig_body_cap(profile, sig.len());
+        if let Ok(body_len) = codec::comp_encode(s2, &mut sig[41..(41 + body_cap)]) {
+            sig[0] = 0x30 + (logn as u8);
+            sig[1..41].copy_from_slice(&nonce);
+            return Ok(41 + body_len);
         }
     }
 }
@@ -732,9 +1107,9 @@ pub(crate) mod tests {
                 SHAKE256::new(),
             ];
             for i in 0..4 {
-                sh[i].inject(seed);
-                sh[i].inject(&[i as u8]);
-                sh[i].flip();
+                sh[i].inject(seed).unwrap();
+                sh[i].inject(&[i as u8]).unwrap();
+                sh[i].flip().unwrap();
             }
             Self {
                 sh,
@@ -748,7 +1123,7 @@ pub(crate) mod tests {
             for i in 0..(4 * 136 / 32) {
                 for j in 0..4 {
                     let k = 32 * i + 8 * j;
-                    self.sh[j].extract(&mut self.buf[k..(k + 8)]);
+                    self.sh[j].extract(&mut self.buf[k..(k + 8)]).unwrap();
                 }
             }
         }
@@ -1081,10 +1456,10 @@ pub(crate) mod tests {
     #[test]
     fn chacha20_prng() {
         let mut sh = SHAKE256::new();
-        sh.inject(&b"rng"[..]);
-        sh.flip();
+        sh.inject(&b"rng"[..]).unwrap();
+        sh.flip().unwrap();
         let mut seed = [0u8; 56];
-        sh.extract(&mut seed);
+        sh.extract(&mut seed).unwrap();
         let mut p = ChaCha20PRNG::new(&seed);
 
         for i in 0..KAT_RNG_1.len() {
@@ -1124,15 +1499,7 @@ pub(crate) mod tests {
         let mut tmp_i16 = [0i16; 2 << 9];
         let mut tmp_u16 = [0u16; 2 << 9];
         let mut tmp_flr = [flr::FLR::ZERO; 9 << 9];
-        let mut sig = [0u8; signature_size(9)];
-
-        // We are using the original Falcon rules; public key does not
-        // actually matter.
-        let mut hvk = [0u8; 64];
-        let mut sh = shake::SHAKE256::new();
-        sh.inject(&KAT_512_VK);
-        sh.flip();
-        sh.extract(&mut hvk);
+        let mut sig = [0u8; SIGNATURE_SIZE_512];
 
         #[cfg(not(feature = "small_context"))]
         let basis = {
@@ -1142,20 +1509,22 @@ pub(crate) mod tests {
             basis
         };
 
-        sign_inner::<FakeCryptoRng, ChaCha20PRNG>(9, &mut rng,
+        sign_falcon_inner::<FakeCryptoRng, ChaCha20PRNG>(
+            FalconProfile::TidecoinLegacyFalcon512, 9, &mut rng,
             &KAT_512_f, &KAT_512_g, &KAT_512_F, &KAT_512_G,
-            &hvk, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &b"data1"[..],
+            &b"data1"[..],
             &mut sig,
             #[cfg(not(feature = "small_context"))]
             &basis,
-            &mut tmp_i16, &mut tmp_u16, &mut tmp_flr);
+            &mut tmp_i16, &mut tmp_u16, &mut tmp_flr)
+            .unwrap();
 
         // Check that the signature value (s2) is exactly the one which
         // was expected.
         assert!(sig[0] == 0x39);
         assert!(sig[1..41] == KAT_512_RND[0..40]);
         let mut sig_raw = [0i16; 512];
-        assert!(codec::comp_decode(&sig[41..], &mut sig_raw[..]));
+        assert!(codec::comp_decode(&sig[41..], &mut sig_raw[..]).is_ok());
         assert!(sig_raw == KAT_512_sig_raw);
     }
 
@@ -1172,15 +1541,7 @@ pub(crate) mod tests {
         let mut tmp_i16 = [0i16; 2 << 9];
         let mut tmp_u16 = [0u16; 2 << 9];
         let mut tmp_flr = [flr::FLR::ZERO; 9 << 9];
-        let mut sig = [0u8; signature_size(9)];
-
-        // We are using the original Falcon rules; public key does not
-        // actually matter.
-        let mut hvk = [0u8; 64];
-        let mut sh = shake::SHAKE256::new();
-        sh.inject(&KAT_512_VK);
-        sh.flip();
-        sh.extract(&mut hvk);
+        let mut sig = [0u8; SIGNATURE_SIZE_512];
 
         #[cfg(not(feature = "small_context"))]
         let basis = {
@@ -1193,14 +1554,15 @@ pub(crate) mod tests {
         };
 
         unsafe {
-            sign_avx2::sign_avx2_inner::<FakeCryptoRng, ChaCha20PRNG>(
-                9, &mut rng,
+            sign_avx2::sign_falcon_avx2_inner::<FakeCryptoRng, ChaCha20PRNG>(
+                FalconProfile::TidecoinLegacyFalcon512, 9, &mut rng,
                 &KAT_512_f, &KAT_512_g, &KAT_512_F, &KAT_512_G,
-                &hvk, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &b"data1"[..],
+                &b"data1"[..],
                 &mut sig,
                 #[cfg(not(feature = "small_context"))]
                 &basis,
-                &mut tmp_i16, &mut tmp_u16, &mut tmp_flr);
+                &mut tmp_i16, &mut tmp_u16, &mut tmp_flr)
+                .unwrap();
         }
 
         // Check that the signature value (s2) is exactly the one which
@@ -1208,7 +1570,7 @@ pub(crate) mod tests {
         assert!(sig[0] == 0x39);
         assert!(sig[1..41] == KAT_512_RND[0..40]);
         let mut sig_raw = [0i16; 512];
-        assert!(codec::comp_decode(&sig[41..], &mut sig_raw[..]));
+        assert!(codec::comp_decode(&sig[41..], &mut sig_raw[..]).is_ok());
         assert!(sig_raw == KAT_512_sig_raw);
     }
 
@@ -1344,6 +1706,7 @@ pub(crate) mod tests {
         6, -38, -46, -15, 28, 10, -4, 3, -1, 4, -40, 16, 61, 31, 28, 8,
         -2, 21, -3, -25, -12, -32, -15, -38, 20, -7, -35, 28, 29, 9, -27
     ];
+    #[allow(dead_code)]
     const KAT_512_VK: [u8; 897] = [
         0x09, 0x02, 0xCE, 0x21, 0x6B, 0xE4, 0x2C, 0xD0, 0x4F, 0xC8,
         0x4C, 0x24, 0xC7, 0x1D, 0x13, 0x07, 0x8E, 0xCA, 0x07, 0x97,

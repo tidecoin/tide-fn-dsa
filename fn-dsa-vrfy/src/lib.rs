@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 //! # FN-DSA signature verification
 //!
@@ -41,16 +42,18 @@
 //!
 //! ## Example usage
 //!
-//! ```ignore
+//! ```no_run
 //! use fn_dsa_vrfy::{
-//!     vrfy_key_size, signature_size, FN_DSA_LOGN_512,
+//!     VRFY_KEY_SIZE_512, SIGNATURE_SIZE_512, FN_DSA_LOGN_512,
 //!     VerifyingKey, VerifyingKeyStandard,
 //!     DOMAIN_NONE, HASH_ID_RAW
 //! };
 //! 
-//! match VerifyingKeyStandard::decode(encoded_verifying_key) {
+//! let encoded_verifying_key = [0u8; VRFY_KEY_SIZE_512];
+//! let sig = [0u8; SIGNATURE_SIZE_512];
+//! match VerifyingKeyStandard::decode(&encoded_verifying_key) {
 //!     Some(vk) => {
-//!         if vk.verify(sig, &DOMAIN_NONE, &HASH_ID_RAW, b"message") {
+//!         if vk.verify(&sig, &DOMAIN_NONE, &HASH_ID_RAW, b"message") {
 //!             // signature is valid
 //!         } else {
 //!             // signature is not valid
@@ -62,15 +65,20 @@
 //! }
 //! ```
 
-use fn_dsa_comm::{codec, mq, hash_to_point, shake};
+use fn_dsa_comm::{codec, mq, hash_to_point, hash_to_point_falcon, shake};
 
 // Re-export useful types, constants and functions.
 pub use fn_dsa_comm::{
     vrfy_key_size, signature_size,
     FN_DSA_LOGN_512, FN_DSA_LOGN_1024,
+    VRFY_KEY_SIZE_512, VRFY_KEY_SIZE_1024,
+    SIGNATURE_SIZE_512, SIGNATURE_SIZE_1024,
+    FalconProfile,
+    FALCON_NONCE_LEN,
+    TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX,
+    LogNError,
     HashIdentifier,
     HASH_ID_RAW,
-    HASH_ID_ORIGINAL_FALCON,
     HASH_ID_SHA256,
     HASH_ID_SHA384,
     HASH_ID_SHA512,
@@ -111,10 +119,14 @@ pub trait VerifyingKey: Sized {
     /// also lead to `false` being returned.
     fn verify(&self, sig: &[u8],
         ctx: &DomainContext, id: &HashIdentifier, hv: &[u8]) -> bool;
+
+    /// Verify a raw-message Falcon-compatible signature.
+    fn verify_falcon(&self, profile: FalconProfile,
+        sig: &[u8], message: &[u8]) -> bool;
 }
 
 macro_rules! vrfy_key_impl {
-    ($typename:ident, $logn_min:expr, $logn_max:expr) =>
+    ($typename:ident, $logn_min:expr_2021, $logn_max:expr_2021) =>
 {
     #[doc = concat!("Signature verifier for degrees (`logn`) ",
         stringify!($logn_min), " to ", stringify!($logn_max), " only.")]
@@ -135,9 +147,9 @@ macro_rules! vrfy_key_impl {
             let mut h = [0u16; 1 << ($logn_max)];
             let mut hashed_key = [0u8; 64];
             let mut sh = shake::SHAKE256::new();
-            sh.inject(src);
-            sh.flip();
-            sh.extract(&mut hashed_key);
+            sh.inject(src).unwrap();
+            sh.flip().unwrap();
+            sh.extract(&mut hashed_key).unwrap();
 
             #[cfg(all(not(feature = "no_avx2"),
                 any(target_arch = "x86_64", target_arch = "x86")))]
@@ -183,6 +195,31 @@ macro_rules! vrfy_key_impl {
                 &self.h[..n], &self.hashed_key, sig, ctx, id, hv,
                 &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)])
         }
+
+        fn verify_falcon(&self, profile: FalconProfile,
+            sig: &[u8], message: &[u8]) -> bool
+        {
+            let logn = self.logn;
+            let n = 1usize << logn;
+            let mut tmp_i16 = [0i16; 1 << ($logn_max)];
+            let mut tmp_u16 = [0u16; 2 << ($logn_max)];
+
+            #[cfg(all(not(feature = "no_avx2"),
+                any(target_arch = "x86_64", target_arch = "x86")))]
+            if self.use_avx2 {
+                unsafe {
+                    return verify_falcon_avx2_inner(
+                        profile, logn, &self.h[..n], sig, message,
+                        &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)],
+                    );
+                }
+            }
+
+            verify_falcon_inner(
+                profile, logn, &self.h[..n], sig, message,
+                &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)],
+            )
+        }
     }
 
 } }
@@ -200,6 +237,23 @@ vrfy_key_impl!(VerifyingKey1024, 10, 10);
 // tests and research only).
 vrfy_key_impl!(VerifyingKeyWeak, 2, 8);
 
+fn falcon_profile_supports_logn(profile: FalconProfile, logn: u32) -> bool {
+    match profile {
+        FalconProfile::PqClean => logn == 9 || logn == 10,
+        FalconProfile::TidecoinLegacyFalcon512 => logn == 9,
+    }
+}
+
+fn falcon_profile_norm_bound(profile: FalconProfile, logn: u32) -> Option<u32> {
+    match profile {
+        FalconProfile::PqClean => Some(mq::SQBETA[logn as usize]),
+        FalconProfile::TidecoinLegacyFalcon512 if logn == 9 => {
+            Some(((7085u64 * 12289u64) >> (10 - logn)) as u32)
+        }
+        FalconProfile::TidecoinLegacyFalcon512 => None,
+    }
+}
+
 // Inner verifying key decoding function. The decoded h[] is
 // automatically converted to NTT format.
 //   logn_min   minimum supported degree (logarithmic) (inclusive)
@@ -210,7 +264,7 @@ vrfy_key_impl!(VerifyingKeyWeak, 2, 8);
 fn decode_inner(logn_min: u32, logn_max: u32, h: &mut [u16], src: &[u8])
     -> Option<u32>
 {
-    if src.len() == 0 {
+    if src.is_empty() {
         return None;
     }
     let head = src[0];
@@ -221,11 +275,11 @@ fn decode_inner(logn_min: u32, logn_max: u32, h: &mut [u16], src: &[u8])
     if logn < logn_min || logn > logn_max {
         return None;
     }
-    if src.len() != vrfy_key_size(logn) {
+    if src.len() != vrfy_key_size(logn).unwrap() {
         return None;
     }
     let n = 1usize << logn;
-    let _ = codec::modq_decode(&src[1..], &mut h[..n])?;
+    let _ = codec::modq_decode(&src[1..], &mut h[..n]).ok()?;
     mq::mqpoly_ext_to_int(logn, h);
     mq::mqpoly_int_to_NTT(logn, h);
     Some(logn)
@@ -243,14 +297,14 @@ fn verify_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     let (t2, _) = tmp_u16.split_at_mut(n);
 
     // Decode signature.
-    if sig.len() != signature_size(logn) {
+    if sig.len() != signature_size(logn).unwrap() {
         return false;
     }
     let head = sig[0];
     if head != (0x30 + logn) as u8 {
         return false;
     }
-    if !codec::comp_decode(&sig[41..], s2i) {
+    if codec::comp_decode(&sig[41..], s2i).is_err() {
         return false;
     }
 
@@ -260,7 +314,9 @@ fn verify_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     let norm2 = mq::signed_poly_sqnorm(logn, &*s2i);
 
     // t1 <- c = hashed message (internal format)
-    hash_to_point(&sig[1..41], hashed_key, ctx, id, hv, t1);
+    if hash_to_point(&sig[1..41], hashed_key, ctx, id, hv, t1).is_err() {
+        return false;
+    }
     mq::mqpoly_ext_to_int(logn, t1);
 
     // t2 <- s2 (NTT format)
@@ -282,6 +338,62 @@ fn verify_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     norm1 < norm2.wrapping_neg() && (norm1 + norm2) <= mq::SQBETA[logn as usize]
 }
 
+fn verify_falcon_inner(
+    profile: FalconProfile,
+    logn: u32,
+    h: &[u16],
+    sig: &[u8],
+    message: &[u8],
+    tmp_i16: &mut [i16],
+    tmp_u16: &mut [u16],
+) -> bool {
+    if !falcon_profile_supports_logn(profile, logn) {
+        return false;
+    }
+    let Some(bound) = falcon_profile_norm_bound(profile, logn) else {
+        return false;
+    };
+    if sig.len() < 1 + FALCON_NONCE_LEN + 1 {
+        return false;
+    }
+    if matches!(profile, FalconProfile::TidecoinLegacyFalcon512)
+        && sig.len() > 1 + FALCON_NONCE_LEN + TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX
+    {
+        return false;
+    }
+
+    let n = 1usize << logn;
+    let s2i = &mut tmp_i16[..n];
+    let (t1, tmp_u16) = tmp_u16.split_at_mut(n);
+    let (t2, _) = tmp_u16.split_at_mut(n);
+
+    let head = sig[0];
+    if head != (0x30 + logn) as u8 {
+        return false;
+    }
+    if codec::comp_decode(&sig[(1 + FALCON_NONCE_LEN)..], s2i).is_err() {
+        return false;
+    }
+    let norm2 = mq::signed_poly_sqnorm(logn, &*s2i);
+
+    if hash_to_point_falcon(&sig[1..(1 + FALCON_NONCE_LEN)], message, t1).is_err() {
+        return false;
+    }
+    mq::mqpoly_ext_to_int(logn, t1);
+
+    mq::mqpoly_signed_to_ext(logn, &*s2i, t2);
+    mq::mqpoly_ext_to_int(logn, t2);
+    mq::mqpoly_int_to_NTT(logn, t2);
+
+    mq::mqpoly_mul_ntt(logn, t2, h);
+    mq::mqpoly_NTT_to_int(logn, t2);
+    mq::mqpoly_sub_int(logn, t1, t2);
+    mq::mqpoly_int_to_ext(logn, t1);
+
+    let norm1 = mq::mqpoly_sqnorm(logn, &*t1);
+    norm1 < norm2.wrapping_neg() && (norm1 + norm2) <= bound
+}
+
 // AVX2-optimized implementation of key decoding.
 #[cfg(all(not(feature = "no_avx2"),
     any(target_arch = "x86_64", target_arch = "x86")))]
@@ -291,7 +403,7 @@ unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
 {
     use fn_dsa_comm::mq_avx2;
 
-    if src.len() == 0 {
+    if src.is_empty() {
         return None;
     }
     let head = src[0];
@@ -302,11 +414,11 @@ unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
     if logn < logn_min || logn > logn_max {
         return None;
     }
-    if src.len() != vrfy_key_size(logn) {
+    if src.len() != vrfy_key_size(logn).unwrap() {
         return None;
     }
     let n = 1usize << logn;
-    let _ = codec::modq_decode(&src[1..], &mut h[..n])?;
+    let _ = codec::modq_decode(&src[1..], &mut h[..n]).ok()?;
     mq_avx2::mqpoly_ext_to_int(logn, h);
     mq_avx2::mqpoly_int_to_NTT(logn, h);
     Some(logn)
@@ -330,14 +442,14 @@ unsafe fn verify_avx2_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     let (t2, _) = tmp_u16.split_at_mut(n);
 
     // Decode signature.
-    if sig.len() != signature_size(logn) {
+    if sig.len() != signature_size(logn).unwrap() {
         return false;
     }
     let head = sig[0];
     if head != (0x30 + logn) as u8 {
         return false;
     }
-    if !codec::comp_decode(&sig[41..], s2i) {
+    if codec::comp_decode(&sig[41..], s2i).is_err() {
         return false;
     }
 
@@ -347,7 +459,9 @@ unsafe fn verify_avx2_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     let norm2 = mq_avx2::signed_poly_sqnorm(logn, &*s2i);
 
     // t1 <- c = hashed message (internal format)
-    hash_to_point(&sig[1..41], hashed_key, ctx, id, hv, t1);
+    if hash_to_point(&sig[1..41], hashed_key, ctx, id, hv, t1).is_err() {
+        return false;
+    }
     mq_avx2::mqpoly_ext_to_int(logn, t1);
 
     // t2 <- s2 (NTT format)
@@ -368,6 +482,67 @@ unsafe fn verify_avx2_inner(logn: u32, h: &[u16], hashed_key: &[u8],
     // enough. We must take care of not overflowing.
     norm1 < norm2.wrapping_neg()
         && (norm1 + norm2) <= mq_avx2::SQBETA[logn as usize]
+}
+
+#[cfg(all(not(feature = "no_avx2"),
+    any(target_arch = "x86_64", target_arch = "x86")))]
+#[target_feature(enable = "avx2")]
+unsafe fn verify_falcon_avx2_inner(
+    profile: FalconProfile,
+    logn: u32,
+    h: &[u16],
+    sig: &[u8],
+    message: &[u8],
+    tmp_i16: &mut [i16],
+    tmp_u16: &mut [u16],
+) -> bool {
+    use fn_dsa_comm::mq_avx2;
+
+    if !falcon_profile_supports_logn(profile, logn) {
+        return false;
+    }
+    let Some(bound) = falcon_profile_norm_bound(profile, logn) else {
+        return false;
+    };
+    if sig.len() < 1 + FALCON_NONCE_LEN + 1 {
+        return false;
+    }
+    if matches!(profile, FalconProfile::TidecoinLegacyFalcon512)
+        && sig.len() > 1 + FALCON_NONCE_LEN + TIDECOIN_LEGACY_FALCON512_SIG_BODY_MAX
+    {
+        return false;
+    }
+
+    let n = 1usize << logn;
+    let s2i = &mut tmp_i16[..n];
+    let (t1, tmp_u16) = tmp_u16.split_at_mut(n);
+    let (t2, _) = tmp_u16.split_at_mut(n);
+
+    let head = sig[0];
+    if head != (0x30 + logn) as u8 {
+        return false;
+    }
+    if codec::comp_decode(&sig[(1 + FALCON_NONCE_LEN)..], s2i).is_err() {
+        return false;
+    }
+    let norm2 = mq_avx2::signed_poly_sqnorm(logn, &*s2i);
+
+    if hash_to_point_falcon(&sig[1..(1 + FALCON_NONCE_LEN)], message, t1).is_err() {
+        return false;
+    }
+    mq_avx2::mqpoly_ext_to_int(logn, t1);
+
+    mq_avx2::mqpoly_signed_to_ext(logn, &*s2i, t2);
+    mq_avx2::mqpoly_ext_to_int(logn, t2);
+    mq_avx2::mqpoly_int_to_NTT(logn, t2);
+
+    mq_avx2::mqpoly_mul_ntt(logn, t2, h);
+    mq_avx2::mqpoly_NTT_to_int(logn, t2);
+    mq_avx2::mqpoly_sub_int(logn, t1, t2);
+    mq_avx2::mqpoly_int_to_ext(logn, t1);
+
+    let norm1 = mq_avx2::mqpoly_sqnorm(logn, &*t1);
+    norm1 < norm2.wrapping_neg() && (norm1 + norm2) <= bound
 }
 
 #[cfg(test)]
@@ -392,15 +567,12 @@ mod tests {
             let mut e_sig = hex::decode(kat[3 * i + 2]).unwrap();
 
             let vk = VerifyingKeyStandard::decode(&e_pub).unwrap();
-            assert!(vk.verify(&e_sig,
-                &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg));
+            assert!(vk.verify_falcon(FalconProfile::PqClean, &e_sig, &e_msg));
             e_msg[0] ^= 0x01;
-            assert!(!vk.verify(&e_sig,
-                &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg));
+            assert!(!vk.verify_falcon(FalconProfile::PqClean, &e_sig, &e_msg));
             e_msg[0] ^= 0x01;
             e_sig[50] ^= 0x01;
-            assert!(!vk.verify(&e_sig,
-                &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg));
+            assert!(!vk.verify_falcon(FalconProfile::PqClean, &e_sig, &e_msg));
             e_sig[50] ^= 0x01;
 
             // Also check the inner function(s).
@@ -408,34 +580,34 @@ mod tests {
             let n = 1usize << logn;
             let mut tmp_i16 = [0i16; 1 << 10];
             let mut tmp_u16 = [0u16; 2 << 10];
-            assert!(verify_inner(logn, &vk.h[..n], &vk.hashed_key,
-                &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+            assert!(verify_falcon_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                &e_sig, &e_msg,
                 &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
             e_msg[0] ^= 0x01;
-            assert!(!verify_inner(logn, &vk.h[..n], &vk.hashed_key,
-                &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+            assert!(!verify_falcon_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                &e_sig, &e_msg,
                 &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
             e_msg[0] ^= 0x01;
             e_sig[50] ^= 0x01;
-            assert!(!verify_inner(logn, &vk.h[..n], &vk.hashed_key,
-                &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+            assert!(!verify_falcon_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                &e_sig, &e_msg,
                 &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
             e_sig[50] ^= 0x01;
             #[cfg(all(not(feature = "no_avx2"),
                 any(target_arch = "x86_64", target_arch = "x86")))]
             if fn_dsa_comm::has_avx2() {
                 unsafe {
-                    assert!(verify_avx2_inner(logn, &vk.h[..n], &vk.hashed_key,
-                        &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+                    assert!(verify_falcon_avx2_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                        &e_sig, &e_msg,
                         &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
                     e_msg[0] ^= 0x01;
-                    assert!(!verify_avx2_inner(logn, &vk.h[..n], &vk.hashed_key,
-                        &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+                    assert!(!verify_falcon_avx2_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                        &e_sig, &e_msg,
                         &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
                     e_msg[0] ^= 0x01;
                     e_sig[50] ^= 0x01;
-                    assert!(!verify_avx2_inner(logn, &vk.h[..n], &vk.hashed_key,
-                        &e_sig, &DOMAIN_NONE, &HASH_ID_ORIGINAL_FALCON, &e_msg,
+                    assert!(!verify_falcon_avx2_inner(FalconProfile::PqClean, logn, &vk.h[..n],
+                        &e_sig, &e_msg,
                         &mut tmp_i16[..n], &mut tmp_u16[..(2 * n)]));
                     e_sig[50] ^= 0x01;
                 }

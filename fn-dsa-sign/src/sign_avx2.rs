@@ -29,7 +29,7 @@ pub(crate) unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
     if logn < logn_min || logn > logn_max {
         return None;
     }
-    if src.len() != sign_key_size(logn) {
+    if src.len() != sign_key_size(logn).unwrap() {
         return None;
     }
     let n = 1usize << logn;
@@ -37,13 +37,13 @@ pub(crate) unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
     assert!(g.len() >= n);
     assert!(F.len() >= n);
     assert!(G.len() >= n);
-    assert!(vrfy_key.len() >= vrfy_key_size(logn));
+    assert!(vrfy_key.len() >= vrfy_key_size(logn).unwrap());
     assert!(hashed_vrfy_key.len() == 64);
     let f = &mut f[..n];
     let g = &mut g[..n];
     let F = &mut F[..n];
     let G = &mut G[..n];
-    let vk = &mut vrfy_key[..vrfy_key_size(logn)];
+    let vk = &mut vrfy_key[..vrfy_key_size(logn).unwrap()];
 
     // Coefficients of (f,g) use a number of bits that depends on logn.
     let nbits_fg = match logn {
@@ -52,9 +52,9 @@ pub(crate) unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
         8..=9 => 6,
         _ => 5,
     };
-    let j = 1 + codec::trim_i8_decode(&src[1..], f, nbits_fg)?;
-    let j = j + codec::trim_i8_decode(&src[j..], g, nbits_fg)?;
-    let j = j + codec::trim_i8_decode(&src[j..], F, 8)?;
+    let j = 1 + codec::trim_i8_decode(&src[1..], f, nbits_fg).ok()?;
+    let j = j + codec::trim_i8_decode(&src[j..], g, nbits_fg).ok()?;
+    let j = j + codec::trim_i8_decode(&src[j..], F, 8).ok()?;
     // We already checked the length of src; any mismatch at this point
     // is an implementation bug.
     assert!(j == src.len());
@@ -89,12 +89,12 @@ pub(crate) unsafe fn decode_avx2_inner(logn_min: u32, logn_max: u32,
     mq_avx2::mqpoly_NTT_to_int(logn, w0);
     mq_avx2::mqpoly_int_to_ext(logn, w0);
     vk[0] = 0x00 + (logn as u8);
-    let j = 1 + codec::modq_encode(&w0[..n], &mut vk[1..]);
+    let j = 1 + codec::modq_encode(&w0[..n], &mut vk[1..]).unwrap();
     assert!(j == vk.len());
     let mut sh = shake::SHAKE256::new();
-    sh.inject(vk);
-    sh.flip();
-    sh.extract(hashed_vrfy_key);
+    sh.inject(vk).unwrap();
+    sh.flip().unwrap();
+    sh.extract(hashed_vrfy_key).unwrap();
 
     // Convert back G to external representation and check that all
     // elements are small.
@@ -143,22 +143,18 @@ pub(crate) unsafe fn sign_avx2_inner<T: CryptoRng + RngCore, P: PRNG>(
     #[cfg(not(feature = "small_context"))]
     basis: &[flr::FLR],
     tmp_i16: &mut [i16], tmp_u16: &mut [u16], tmp_flr: &mut [flr::FLR])
+    -> Result<(), SigningKeyError>
 {
     let n = 1usize << logn;
     assert!(f.len() == n);
     assert!(g.len() == n);
     assert!(F.len() == n);
     assert!(G.len() == n);
-    assert!(sig.len() == signature_size(logn));
-
-    // Special behaviour for the original Falcon algorithm (for test
-    // reproducibility). TODO: remove when switching to final test vectors.
-    let orig_falcon = id.0.len() == 1 && id.0[0] == 0xFF;
+    assert!(sig.len() == signature_size(logn).unwrap());
 
     // Hash the message with a 40-byte random nonce, to produce the
     // hashed message.
     let mut nonce = [0u8; 40];
-    let mut first = true;
 
     // Usually the signature generation works at the first attempt, but
     // occasionally we need to try again because the obtained signature
@@ -166,15 +162,9 @@ pub(crate) unsafe fn sign_avx2_inner<T: CryptoRng + RngCore, P: PRNG>(
     // signature size.
     loop {
         let hm = &mut tmp_u16[0..n];
-        // We must generate a random 40-byte nonce, and hash the
-        // message to a polynomial hm[].
-        // In the original Falcon, this was done once; in FN-DSA, this
-        // is done at each loop restart.
-        // (TODO: align with final spec)
-        if first || !orig_falcon {
-            rng.fill_bytes(&mut nonce);
-            hash_to_point(&nonce, hashed_vrfy_key, ctx, id, hv, hm);
-            first = false;
+        rng.fill_bytes(&mut nonce);
+        if hash_to_point(&nonce, hashed_vrfy_key, ctx, id, hv, hm).is_err() {
+            unreachable!();
         }
 
         // We initialize the PRNG with a 56-byte seed, to match the
@@ -393,10 +383,209 @@ pub(crate) unsafe fn sign_avx2_inner<T: CryptoRng + RngCore, P: PRNG>(
         // We have a candidate signature; we must encode it. This may
         // fail, since encoding is variable-size and might not fit in the
         // target size.
-        if codec::comp_encode(s2, &mut sig[41..]) {
+        if codec::comp_encode(s2, &mut sig[41..]).is_ok() {
             sig[0] = 0x30 + (logn as u8);
             sig[1..41].copy_from_slice(&nonce);
-            return;
+            return Ok(());
+        }
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn sign_falcon_avx2_inner<T: CryptoRng + RngCore, P: PRNG>(
+    profile: FalconProfile,
+    logn: u32,
+    rng: &mut T,
+    f: &[i8],
+    g: &[i8],
+    F: &[i8],
+    G: &[i8],
+    message: &[u8],
+    sig: &mut [u8],
+    #[cfg(not(feature = "small_context"))]
+    basis: &[flr::FLR],
+    tmp_i16: &mut [i16],
+    tmp_u16: &mut [u16],
+    tmp_flr: &mut [flr::FLR],
+) -> Result<usize, SigningKeyError> {
+    let n = 1usize << logn;
+    assert!(f.len() == n);
+    assert!(g.len() == n);
+    assert!(F.len() == n);
+    assert!(G.len() == n);
+    if !falcon_profile_supports_logn(profile, logn) {
+        return Err(SigningKeyError::UnsupportedFalconProfileForDegree { profile, logn });
+    }
+    let min_len = 1 + FALCON_NONCE_LEN + 1;
+    if sig.len() < min_len {
+        return Err(SigningKeyError::InvalidSignatureBufferLenAtLeast {
+            min: min_len,
+            actual: sig.len(),
+        });
+    }
+
+    let mut nonce = [0u8; FALCON_NONCE_LEN];
+    let mut first = true;
+    loop {
+        let hm = &mut tmp_u16[0..n];
+        if first || falcon_profile_retry_uses_fresh_nonce(profile) {
+            rng.fill_bytes(&mut nonce);
+            hash_to_point_falcon(&nonce, message, hm).unwrap();
+            first = false;
+        }
+
+        let mut seed = [0u8; 56];
+        rng.fill_bytes(&mut seed);
+        let mut samp = sampler_avx2::Sampler::<P>::new(logn, &seed);
+
+        #[cfg(feature = "small_context")]
+        {
+            compute_basis_inner(logn, f, g, F, G, tmp_flr);
+
+            let (b00, work) = tmp_flr.split_at_mut(n);
+            let (b01, work) = work.split_at_mut(n);
+            let (b10, work) = work.split_at_mut(n);
+            let (b11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            t0.copy_from_slice(&*b01);
+            poly_avx2::poly_mulownadj_fft(logn, t0);
+            t1.copy_from_slice(&*b00);
+            poly_avx2::poly_muladj_fft(logn, t1, b10);
+            poly_avx2::poly_mulownadj_fft(logn, b00);
+            poly_avx2::poly_add(logn, b00, t0);
+            t0.copy_from_slice(b01);
+            poly_avx2::poly_muladj_fft(logn, b01, b11);
+            poly_avx2::poly_add(logn, b01, t1);
+            poly_avx2::poly_mulownadj_fft(logn, b10);
+            t1.copy_from_slice(b11);
+            poly_avx2::poly_mulownadj_fft(logn, t1);
+            poly_avx2::poly_add(logn, b10, t1);
+        }
+
+        #[cfg(not(feature = "small_context"))]
+        {
+            let (b00, work) = basis.split_at(n);
+            let (b01, work) = work.split_at(n);
+            let (b10, work) = work.split_at(n);
+            let (b11, _) = work.split_at(n);
+
+            let (g00, work) = tmp_flr.split_at_mut(n);
+            let (g01, work) = work.split_at_mut(n);
+            let (g11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            g00.copy_from_slice(b00);
+            poly_avx2::poly_mulownadj_fft(logn, g00);
+            t0.copy_from_slice(b01);
+            poly_avx2::poly_mulownadj_fft(logn, t0);
+            poly_avx2::poly_add(logn, g00, t0);
+
+            g01.copy_from_slice(b00);
+            poly_avx2::poly_muladj_fft(logn, g01, b10);
+            t0.copy_from_slice(b01);
+            poly_avx2::poly_muladj_fft(logn, t0, b11);
+            poly_avx2::poly_add(logn, g01, t0);
+
+            g11.copy_from_slice(b10);
+            poly_avx2::poly_mulownadj_fft(logn, g11);
+            t0.copy_from_slice(b11);
+            poly_avx2::poly_mulownadj_fft(logn, t0);
+            poly_avx2::poly_add(logn, g11, t0);
+
+            t0.copy_from_slice(b11);
+            t1.copy_from_slice(b01);
+        }
+
+        {
+            let (_, work) = tmp_flr.split_at_mut(3 * n);
+            let (b11, work) = work.split_at_mut(n);
+            let (b01, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, _) = work.split_at_mut(n);
+
+            for i in 0..n {
+                t0[i] = flr::FLR::from_i32(hm[i] as i32);
+            }
+            poly_avx2::FFT(logn, t0);
+            t1.copy_from_slice(t0);
+            poly_avx2::poly_mul_fft(logn, t1, b01);
+            poly_avx2::poly_mulconst(logn, t1, -INV_Q);
+            poly_avx2::poly_mul_fft(logn, t0, b11);
+            poly_avx2::poly_mulconst(logn, t0, INV_Q);
+        }
+
+        tmp_flr.copy_within((5 * n)..(7 * n), 3 * n);
+
+        {
+            let (g00, work) = tmp_flr.split_at_mut(n);
+            let (g01, work) = work.split_at_mut(n);
+            let (g11, work) = work.split_at_mut(n);
+            let (t0, work) = work.split_at_mut(n);
+            let (t1, work) = work.split_at_mut(n);
+            samp.ffsamp_fft(t0, t1, g00, g01, g11, work);
+        }
+
+        tmp_flr.copy_within((3 * n)..(5 * n), 4 * n);
+
+        #[cfg(feature = "small_context")]
+        compute_basis_avx2_inner(logn, f, g, F, G, tmp_flr);
+
+        #[cfg(not(feature = "small_context"))]
+        tmp_flr[..(4 * n)].copy_from_slice(&basis[..(4 * n)]);
+
+        let (b00, work) = tmp_flr.split_at_mut(n);
+        let (b01, work) = work.split_at_mut(n);
+        let (b10, work) = work.split_at_mut(n);
+        let (b11, work) = work.split_at_mut(n);
+        let (t0, work) = work.split_at_mut(n);
+        let (t1, work) = work.split_at_mut(n);
+        let (tx, work) = work.split_at_mut(n);
+        let (ty, _) = work.split_at_mut(n);
+
+        tx.copy_from_slice(t0);
+        ty.copy_from_slice(t1);
+        poly_avx2::poly_mul_fft(logn, tx, b00);
+        poly_avx2::poly_mul_fft(logn, ty, b10);
+        poly_avx2::poly_add(logn, tx, ty);
+        ty.copy_from_slice(t0);
+        poly_avx2::poly_mul_fft(logn, ty, b01);
+        t0.copy_from_slice(tx);
+        poly_avx2::poly_mul_fft(logn, t1, b11);
+        poly_avx2::poly_add(logn, t1, ty);
+        poly_avx2::iFFT(logn, t0);
+        poly_avx2::iFFT(logn, t1);
+
+        let mut sqn = 0u32;
+        let mut ng = 0;
+        for i in 0..n {
+            let z = (hm[i] as i32) - (t0[i].rint() as i32);
+            let z = (z as i16) as i32;
+            sqn = sqn.wrapping_add((z * z) as u32);
+            ng |= sqn;
+        }
+
+        let s2 = &mut tmp_i16[..n];
+        for i in 0..n {
+            let sz = (-t1[i].rint()) as i16;
+            let z = sz as i32;
+            sqn = sqn.wrapping_add((z * z) as u32);
+            ng |= sqn;
+            s2[i] = sz;
+        }
+
+        sqn |= ((ng as i32) >> 31) as u32;
+        if sqn > mq_avx2::SQBETA[logn as usize] {
+            continue;
+        }
+
+        let body_cap = falcon_profile_sig_body_cap(profile, sig.len());
+        if let Ok(body_len) = codec::comp_encode(s2, &mut sig[41..(41 + body_cap)]) {
+            sig[0] = 0x30 + (logn as u8);
+            sig[1..41].copy_from_slice(&nonce);
+            return Ok(41 + body_len);
         }
     }
 }

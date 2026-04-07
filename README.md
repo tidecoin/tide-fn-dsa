@@ -86,7 +86,8 @@ verifying (the performance boost over SSE2 for signing is rather slight,
 but for keygen and verifying it almost halves the cost).
 
 The following features, which are not enabled by default, can be used to
-modify the code generation:
+modify the code generation. When using the umbrella `fn-dsa` crate, these
+features can be enabled directly on that crate:
 
   - `no_avx2`: do not include the AVX2-optimized code. Using this option
     also removes the runtime test for CPU support of AVX2 opcodes; it
@@ -199,13 +200,12 @@ polynomial `hm` with rejection sampling:
     hm <- SHAKE256( nonce || message )
 ```
 
-This mode is supported by the implementation (using the custom
-`HASH_ID_ORIGINAL_FALCON` hash identifier); this is an obsolescent
-feature and support of the original Falcon design is expected to be
-dropped at some point. For enhanced functionality (support of pre-hashed
-messages) and better security in edge cases, the implementation
-currently implements what is my best guess of how FN-DSA will be
-defined, using the existing ML-DSA ([FIPS
+This mode is supported by the implementation through the explicit
+Falcon profile APIs (`FalconProfile::PqClean` and
+`FalconProfile::TidecoinLegacyFalcon512`). For enhanced functionality
+(support of pre-hashed messages) and better security in edge cases, the
+implementation currently implements what is my best guess of how FN-DSA
+will be defined, using the existing ML-DSA ([FIPS
 204](https://csrc.nist.gov/pubs/fips/204/final)) as a template. The
 message is either "raw", or pre-hashed with a collision-resistant
 hash function. If the message is "raw" then the `hm` polynomial is
@@ -257,12 +257,11 @@ bytes just like in ML-DSA.
 As an additional variation: the Falcon signature generation works in a
 loop, because it may happen, with low probability, that either the
 sampled vector is not short enough, or that the final signature cannot
-be encoded within the target signature size (which is fixed). In either
-case, with the original Falcon, the process restarts but reuses the same
-nonce (hence the same `hm` value). In the variant implemented here
-(outside of the "original Falcon" mode), a new nonce is generated when
-such a restart happens. Though the original Falcon method is not known
-to be unsafe in any way, this nonce regeneration has been [recently
+be encoded within the target signature size. In the PQClean-compatible
+profile, a new nonce is generated when such a restart happens. In the
+Tidecoin legacy Falcon-512 profile, the nonce is reused across retries
+for node compatibility. Though the original Falcon method is not known
+to be unsafe in any way, fresh nonce regeneration has been [recently
 argued](https://eprint.iacr.org/2024/1769) to make it much easier to
 prove some security properties of the scheme. Since restarts are rare,
 this nonce regeneration does not imply any noticeable performance hit.
@@ -298,7 +297,7 @@ An example usage code looks as follows:
 ```rust
 use rand_core::OsRng;
 use fn_dsa::{
-    sign_key_size, vrfy_key_size, signature_size, FN_DSA_LOGN_512,
+    SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, SIGNATURE_SIZE_512, FN_DSA_LOGN_512,
     KeyPairGenerator, KeyPairGeneratorStandard,
     SigningKey, SigningKeyStandard,
     VerifyingKey, VerifyingKeyStandard,
@@ -307,14 +306,14 @@ use fn_dsa::{
 
 // Generate key pair.
 let mut kg = KeyPairGeneratorStandard::default();
-let mut sign_key = [0u8; sign_key_size(FN_DSA_LOGN_512)];
-let mut vrfy_key = [0u8; vrfy_key_size(FN_DSA_LOGN_512)];
-kg.keygen(FN_DSA_LOGN_512, &mut OsRng, &mut sign_key, &mut vrfy_key);
+let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+kg.keygen(FN_DSA_LOGN_512, &mut OsRng, &mut sign_key, &mut vrfy_key)?;
 
 // Sign a message with the signing key.
-let mut sk = SigningKeyStandard::decode(&sign_key).or_else(...);
-let mut sig = vec![0u8; signature_size(sk.get_logn())];
-sk.sign(&mut OsRng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig);
+let mut sk = SigningKeyStandard::decode(&sign_key).expect("valid signing key");
+let mut sig = [0u8; SIGNATURE_SIZE_512];
+sk.sign(&mut OsRng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig)?;
 
 // Verify a signature with the verifying key.
 match VerifyingKeyStandard::decode(&vrfy_key) {

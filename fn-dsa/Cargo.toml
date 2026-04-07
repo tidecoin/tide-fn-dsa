@@ -22,8 +22,20 @@ hex.workspace = true
 
 [features]
 default = []
-no_avx2 = []
-shake256x4 = [ "fn-dsa-comm/shake256x4", "fn-dsa-kgen/shake256x4", "fn-dsa-sign/shake256x4" ]
+no_avx2 = [
+    "fn-dsa-comm/no_avx2",
+    "fn-dsa-kgen/no_avx2",
+    "fn-dsa-sign/no_avx2",
+    "fn-dsa-vrfy/no_avx2",
+]
+shake256x4 = [
+    "fn-dsa-comm/shake256x4",
+    "fn-dsa-kgen/shake256x4",
+    "fn-dsa-sign/shake256x4",
+]
+small_context = [ "fn-dsa-sign/small_context" ]
+div_emu = [ "fn-dsa-sign/div_emu" ]
+sqrt_emu = [ "fn-dsa-sign/sqrt_emu" ]
 
 [[bench]]
 name = "keygen"

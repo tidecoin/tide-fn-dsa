@@ -46,8 +46,8 @@ pub struct FakeRNG(SHAKE256);
 impl FakeRNG {
     pub fn new(seed: &[u8]) -> Self {
         let mut sh = SHAKE256::new();
-        sh.inject(seed);
-        sh.flip();
+        sh.inject(seed).unwrap();
+        sh.flip().unwrap();
         Self(sh)
     }
 }
@@ -56,27 +56,27 @@ impl CryptoRng for FakeRNG {}
 impl RngCore for FakeRNG {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
-        self.0.extract(&mut buf);
+        self.0.extract(&mut buf).unwrap();
         u32::from_le_bytes(buf)
     }
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
-        self.0.extract(&mut buf);
+        self.0.extract(&mut buf).unwrap();
         u64::from_le_bytes(buf)
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.0.extract(dest);
+        self.0.extract(dest).unwrap();
     }
     fn try_fill_bytes(&mut self, dest: &mut [u8])
         -> Result<(), RngError>
     {
-        self.0.extract(dest);
+        self.0.extract(dest).unwrap();
         Ok(())
     }
 }
 
 pub fn banner_arch() {
-    #[cfg(any(target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         print!("Arch: x86_64 (64-bit)");
         #[cfg(feature = "no_avx2")]
@@ -87,7 +87,7 @@ pub fn banner_arch() {
         println!();
     }
 
-    #[cfg(any(target_arch = "x86"))]
+    #[cfg(target_arch = "x86")]
     {
         print!("Arch: x86 (32-bit)");
         #[cfg(feature = "no_avx2")]
@@ -98,13 +98,13 @@ pub fn banner_arch() {
         println!();
     }
 
-    #[cfg(any(target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     println!("Arch: aarch64");
 
-    #[cfg(any(target_arch = "arm64ec"))]
+    #[cfg(target_arch = "arm64ec")]
     println!("Arch: arm64ec");
 
-    #[cfg(any(target_arch = "riscv64"))]
+    #[cfg(target_arch = "riscv64")]
     println!("Arch: riscv64");
 
     #[cfg(not(any(
