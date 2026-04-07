@@ -1,0 +1,56 @@
+[package]
+name = "tide-fn-dsa"
+version = "0.4.0"
+authors.workspace = true
+categories.workspace = true
+description = "Tidecoin umbrella package for FN-DSA, PQClean Falcon, and Tidecoin legacy Falcon support"
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "tide_fn_dsa"
+
+[dependencies]
+tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm" }
+tide-fn-dsa-kgen = { version = "0.4", path = "../tide-fn-dsa-kgen" }
+tide-fn-dsa-sign = { version = "0.4", path = "../tide-fn-dsa-sign" }
+tide-fn-dsa-vrfy = { version = "0.4", path = "../tide-fn-dsa-vrfy" }
+
+[dev-dependencies]
+hex.workspace = true
+
+[features]
+default = []
+no_avx2 = [
+    "tide-fn-dsa-comm/no_avx2",
+    "tide-fn-dsa-kgen/no_avx2",
+    "tide-fn-dsa-sign/no_avx2",
+    "tide-fn-dsa-vrfy/no_avx2",
+]
+shake256x4 = [
+    "tide-fn-dsa-comm/shake256x4",
+    "tide-fn-dsa-kgen/shake256x4",
+    "tide-fn-dsa-sign/shake256x4",
+]
+small_context = [ "tide-fn-dsa-sign/small_context" ]
+div_emu = [ "tide-fn-dsa-sign/div_emu" ]
+sqrt_emu = [ "tide-fn-dsa-sign/sqrt_emu" ]
+
+[[bench]]
+name = "keygen"
+path = "benches/keygen.rs"
+harness = false
+
+[[bench]]
+name = "sign"
+path = "benches/sign.rs"
+harness = false
+
+[[bench]]
+name = "verify"
+path = "benches/verify.rs"
+harness = false

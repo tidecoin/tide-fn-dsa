@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "fn-dsa",
-    "fn-dsa-comm",
-    "fn-dsa-kgen",
-    "fn-dsa-sign",
-    "fn-dsa-vrfy",
+    "tide-fn-dsa",
+    "tide-fn-dsa-comm",
+    "tide-fn-dsa-kgen",
+    "tide-fn-dsa-sign",
+    "tide-fn-dsa-vrfy",
 ]
 resolver = "2"
 

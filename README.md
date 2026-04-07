@@ -25,28 +25,27 @@ This fork also adds explicit compatibility support for:
   - Tidecoin PQHD deterministic Falcon key derivation
 
 Cargo package names in this fork are `tide-fn-dsa*`. The Rust crate ids
-remain `fn_dsa*`, so downstreams can keep existing import paths by
-renaming dependencies in `Cargo.toml`, for example:
+are `tide_fn_dsa*`, matching the Tidecoin package identity:
 
 ```toml
 [dependencies]
-fn-dsa = { package = "tide-fn-dsa", git = "https://github.com/tidecoin/tide-fn-dsa" }
+tide-fn-dsa = { git = "https://github.com/tidecoin/tide-fn-dsa" }
 ```
 
 If you want only the umbrella package, use:
 
 ```toml
 [dependencies]
-fn-dsa = { package = "tide-fn-dsa", git = "https://github.com/tidecoin/tide-fn-dsa" }
+tide-fn-dsa = { git = "https://github.com/tidecoin/tide-fn-dsa" }
 ```
 
-If you want split packages while keeping existing Rust import paths, use:
+If you want split packages, use:
 
 ```toml
 [dependencies]
-fn-dsa-kgen = { package = "tide-fn-dsa-kgen", git = "https://github.com/tidecoin/tide-fn-dsa" }
-fn-dsa-sign = { package = "tide-fn-dsa-sign", git = "https://github.com/tidecoin/tide-fn-dsa" }
-fn-dsa-vrfy = { package = "tide-fn-dsa-vrfy", git = "https://github.com/tidecoin/tide-fn-dsa" }
+tide-fn-dsa-kgen = { git = "https://github.com/tidecoin/tide-fn-dsa" }
+tide-fn-dsa-sign = { git = "https://github.com/tidecoin/tide-fn-dsa" }
+tide-fn-dsa-vrfy = { git = "https://github.com/tidecoin/tide-fn-dsa" }
 ```
 
 ## Sizes
@@ -119,7 +118,7 @@ verifying (the performance boost over SSE2 for signing is rather slight,
 but for keygen and verifying it almost halves the cost).
 
 The following features, which are not enabled by default, can be used to
-modify the code generation. When using the umbrella `fn-dsa` crate, these
+modify the code generation. When using the umbrella `tide-fn-dsa` crate, these
 features can be enabled directly on that crate:
 
   - `no_avx2`: do not include the AVX2-optimized code. Using this option
@@ -329,7 +328,7 @@ An example usage code looks as follows:
 
 ```rust
 use rand_core::OsRng;
-use fn_dsa::{
+use tide_fn_dsa::{
     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, SIGNATURE_SIZE_512, FN_DSA_LOGN_512,
     KeyPairGenerator, KeyPairGeneratorStandard,
     SigningKey, SigningKeyStandard,
@@ -366,7 +365,7 @@ match VerifyingKeyStandard::decode(&vrfy_key) {
 For deterministic Falcon key generation, the seeded APIs are split
 explicitly:
 
-  - `keygen_from_seed_native()` uses the native `fn-dsa` / `ntrugen`
+  - `keygen_from_seed_native()` uses the upstream `fn-dsa` / `ntrugen`
     seeded Falcon path.
   - `keygen_from_seed_pqclean()` uses the original
     PQClean-compatible seeded Falcon path.
@@ -375,7 +374,7 @@ explicitly:
     compatibility path.
 
 This split is intentional: the same 48-byte Falcon seed does not
-generally produce the same key pair under the native `fn-dsa` seeded
+generally produce the same key pair under the upstream `fn-dsa` seeded
 key generator and the original Falcon/PQClean/Tidecoin seeded key
 generator.
 
@@ -383,7 +382,7 @@ Compatibility-oriented examples:
 
 ```rust
 use rand_core::OsRng;
-use fn_dsa::{
+use tide_fn_dsa::{
     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, FN_DSA_LOGN_512,
     FALCON_KEYGEN_SEED_SIZE, PQHD_KEYGEN_STREAM_SIZE,
     KeyPairGenerator, KeyPairGeneratorStandard,
@@ -411,7 +410,7 @@ kg.keygen_from_seed_native(FN_DSA_LOGN_512, &seed48, &mut sign_key, &mut vrfy_ke
 
 ```rust
 use rand_core::OsRng;
-use fn_dsa::{
+use tide_fn_dsa::{
     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, TIDECOIN_LEGACY_FALCON512_SIG_MAX,
     FN_DSA_LOGN_512, FalconProfile,
     KeyPairGenerator, KeyPairGeneratorStandard,

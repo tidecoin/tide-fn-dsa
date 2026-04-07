@@ -1,0 +1,25 @@
+[package]
+name = "tide-fn-dsa-vrfy"
+version = "0.4.0"
+authors.workspace = true
+categories.workspace = true
+description = "Tidecoin FN-DSA and Falcon signature verification, including PQClean and Tidecoin legacy Falcon profiles"
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "tide_fn_dsa_vrfy"
+
+[dependencies]
+tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm" }
+
+[dev-dependencies]
+hex.workspace = true
+
+[features]
+default = []
+no_avx2 = []
