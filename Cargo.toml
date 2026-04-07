@@ -11,12 +11,12 @@ resolver = "2"
 [workspace.package]
 authors = ["Thomas Pornin <thomas.pornin@nccgroup.com>"]
 categories = ["cryptography", "no-std"]
-description = "FN-DSA signature scheme"
+description = "Tidecoin fork of rust-fn-dsa with FN-DSA, PQClean Falcon, and Tidecoin legacy compatibility"
 edition = "2021"
-keywords = ["cryptography", "fn-dsa", "falcon"]
+keywords = ["cryptography", "fn-dsa", "falcon", "tidecoin"]
 license = "Unlicense"
 readme = "README.md"
-repository = "https://github.com/pornin/rust-fn-dsa"
+repository = "https://github.com/tidecoin/tide-fn-dsa"
 rust-version = "1.82"
 
 [workspace.dependencies]

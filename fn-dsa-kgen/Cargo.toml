@@ -1,9 +1,9 @@
 [package]
-name = "fn-dsa-kgen"
-version = "0.3.0"
+name = "tide-fn-dsa-kgen"
+version = "0.4.0"
 authors.workspace = true
 categories.workspace = true
-description.workspace = true
+description = "Tidecoin FN-DSA and Falcon key generation, including PQClean and PQHD deterministic compatibility paths"
 edition.workspace = true
 keywords.workspace = true
 license.workspace = true
@@ -11,8 +11,11 @@ readme.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "fn_dsa_kgen"
+
 [dependencies]
-fn-dsa-comm = { version = "0.3", path = "../fn-dsa-comm" }
+fn-dsa-comm = { package = "tide-fn-dsa-comm", version = "0.4", path = "../fn-dsa-comm" }
 sha2.workspace = true
 zeroize.workspace = true
 

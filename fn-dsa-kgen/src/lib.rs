@@ -46,6 +46,18 @@
 //! Given `logn`, the `sign_key_size()` and `vrfy_key_size()` functions
 //! yield the sizes of the signing and verifying keys (in bytes).
 //!
+//! For Falcon-512 and Falcon-1024, this crate exposes two different
+//! deterministic seeded key-generation families:
+//!
+//!  - `keygen_from_seed_native()` uses the native `fn-dsa` / `ntrugen`
+//!    seeded key-generation path.
+//!  - `keygen_from_seed_pqclean()` and `keygen_from_stream_key_tidecoin()`
+//!    use PQClean/Tidecoin-compatible Falcon seeded key generation.
+//!
+//! These APIs are intentionally distinct because the native `fn-dsa`
+//! seeded Falcon path does not map a seed to the same key pair as the
+//! original Falcon/PQClean/Tidecoin seeded path.
+//!
 //! ## WARNING
 //!
 //! **The FN-DSA standard is currently being drafted, but no version has
@@ -104,6 +116,7 @@ mod fxp;
 mod gauss;
 mod mp31;
 mod ntru;
+mod pqclean_compat;
 mod poly;
 mod vect;
 mod zint31;
@@ -379,8 +392,7 @@ macro_rules! kgen_impl {
 } }
 
 // An FN-DSA key pair generator for the standard degrees (512 and 1024,
-// for logn = 9 or 10, respectively). Attempts at creating a lower degree
-// key pair trigger a panic.
+// for logn = 9 or 10, respectively).
 kgen_impl!(KeyPairGeneratorStandard, 9, 10);
 
 // An FN-DSA key pair generator specialized for degree 512 (logn = 9).
@@ -403,14 +415,15 @@ kgen_impl!(KeyPairGeneratorWeak, 2, 8);
 macro_rules! deterministic_falcon_impl {
     ($typename:ident) => {
         impl $typename {
-            /// Generate a deterministic Falcon key pair from a 48-byte seed.
+            /// Generate a deterministic Falcon key pair with the native
+            /// `fn-dsa` / `ntrugen` seeded key-generation path.
             ///
-            /// This API is intended for compatibility-sensitive deterministic
-            /// key derivation. It always uses the scalar SHAKE256 seed
-            /// expansion path, even if the `shake256x4` feature is enabled,
-            /// so that a given seed maps to the same Falcon key pair as in
-            /// PQClean/Tidecoin deterministic key generation.
-            pub fn keygen_from_seed(
+            /// This API uses the same seeded sampler and reduction logic as
+            /// the library's native Falcon key-generation engine, including
+            /// `shake256x4` and AVX2 acceleration when enabled and available.
+            /// It is deterministic for a given seed, but it is not intended
+            /// to reproduce PQClean/Tidecoin Falcon key pairs byte-for-byte.
+            pub fn keygen_from_seed_native(
                 &mut self,
                 logn: u32,
                 seed: &[u8],
@@ -424,7 +437,7 @@ macro_rules! deterministic_falcon_impl {
                         actual: seed.len(),
                     });
                 }
-                let result = deterministic_keygen_inner(
+                let result = deterministic_keygen_inner_native(
                     logn,
                     seed,
                     sign_key,
@@ -438,16 +451,46 @@ macro_rules! deterministic_falcon_impl {
                 result
             }
 
+            /// Generate a deterministic Falcon key pair from a 48-byte seed
+            /// with PQClean/Tidecoin-compatible Falcon output.
+            ///
+            /// This compatibility API always uses the original Falcon/PQClean
+            /// scalar SHAKE256 seed expansion and Gaussian sampler so that a
+            /// given seed maps to the same Falcon key pair as in
+            /// PQClean/Tidecoin deterministic key generation.
+            pub fn keygen_from_seed_pqclean(
+                &mut self,
+                logn: u32,
+                seed: &[u8],
+                sign_key: &mut [u8],
+                vrfy_key: &mut [u8],
+            ) -> Result<(), DeterministicKeyGenError> {
+                validate_deterministic_falcon_io(logn, sign_key, vrfy_key)?;
+                if seed.len() != FALCON_KEYGEN_SEED_SIZE {
+                    return Err(DeterministicKeyGenError::InvalidSeedLen {
+                        expected: FALCON_KEYGEN_SEED_SIZE,
+                        actual: seed.len(),
+                    });
+                }
+                let result = deterministic_keygen_inner_pqclean(
+                    logn,
+                    seed,
+                    sign_key,
+                    vrfy_key,
+                );
+                self.zeroize();
+                result
+            }
+
             /// Generate a deterministic Falcon key pair from a 64-byte PQHD
             /// stream key using the Tidecoin node retry schedule.
             ///
-            /// This API derives 48-byte Falcon seeds from the provided
-            /// 64-byte stream key with the same HMAC-SHA512 stream-block KDF
-            /// and counter-based retry schedule as the Tidecoin node.
-            /// As with [`Self::keygen_from_seed()`], the scalar SHAKE256 seed
-            /// expansion path is always used so that outputs do not depend on
-            /// the `shake256x4` feature.
-            pub fn keygen_from_stream_key(
+            /// This compatibility API derives 48-byte Falcon seeds from the
+            /// provided 64-byte stream key with the same HMAC-SHA512
+            /// stream-block KDF and counter-based retry schedule as the
+            /// Tidecoin node, then uses the PQClean-compatible Falcon seeded
+            /// key-generation path.
+            pub fn keygen_from_stream_key_tidecoin(
                 &mut self,
                 logn: u32,
                 stream_key: &[u8],
@@ -463,18 +506,14 @@ macro_rules! deterministic_falcon_impl {
                 })?;
                 let result = 'attempts: {
                     for ctr in 0..PQHD_MAX_DETERMINISTIC_ATTEMPTS {
-                    let mut block = pqhd_stream_block(stream_key, ctr);
-                        let result = deterministic_keygen_inner(
-                        logn,
-                        &block[..FALCON_KEYGEN_SEED_SIZE],
-                        sign_key,
-                        vrfy_key,
-                        &mut self.tmp_i8,
-                        &mut self.tmp_u16,
-                        &mut self.tmp_u32,
-                        &mut self.tmp_fxr,
-                    );
-                    block.zeroize();
+                        let mut block = pqhd_stream_block(stream_key, ctr);
+                        let result = deterministic_keygen_inner_pqclean(
+                            logn,
+                            &block[..FALCON_KEYGEN_SEED_SIZE],
+                            sign_key,
+                            vrfy_key,
+                        );
+                        block.zeroize();
                         match result {
                             Ok(()) => break 'attempts Ok(()),
                             Err(DeterministicKeyGenError::RejectedSeed) => continue,
@@ -531,7 +570,30 @@ fn encode_keypair(
     Ok(())
 }
 
-fn deterministic_keygen_inner(
+fn deterministic_keygen_inner_pqclean(
+    logn: u32,
+    seed: &[u8],
+    sign_key: &mut [u8],
+    vrfy_key: &mut [u8],
+) -> Result<(), DeterministicKeyGenError> {
+    assert!(2 <= logn && logn <= 10);
+    assert!(sign_key.len() == sign_key_size(logn).unwrap());
+    assert!(vrfy_key.len() == vrfy_key_size(logn).unwrap());
+
+    let seed: &[u8; FALCON_KEYGEN_SEED_SIZE] = seed.try_into().map_err(|_| {
+        DeterministicKeyGenError::InvalidSeedLen {
+            expected: FALCON_KEYGEN_SEED_SIZE,
+            actual: seed.len(),
+        }
+    })?;
+    if pqclean_compat::keygen_pqclean(logn, seed, sign_key, vrfy_key) {
+        Ok(())
+    } else {
+        Err(DeterministicKeyGenError::RejectedSeed)
+    }
+}
+
+fn deterministic_keygen_inner_native(
     logn: u32,
     seed: &[u8],
     sign_key: &mut [u8],
@@ -556,13 +618,13 @@ fn deterministic_keygen_inner(
         any(target_arch = "x86_64", target_arch = "x86")))]
     if fn_dsa_comm::has_avx2() {
         unsafe {
-            keygen_from_seed_avx2_scalar_prng(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+            keygen_from_seed_avx2(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
             fn_dsa_comm::mq_avx2::mqpoly_div_small(logn, f, g, h, t16);
         }
         return encode_keypair(logn, f, g, F, h, sign_key, vrfy_key);
     }
 
-    keygen_from_seed_scalar_prng(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+    keygen_native_from_seed(logn, seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
     mq::mqpoly_div_small(logn, f, g, h, t16);
     encode_keypair(logn, f, g, F, h, sign_key, vrfy_key)
 }
@@ -609,17 +671,17 @@ fn keygen_inner<T: CryptoRng + RngCore>(logn: u32, rng: &mut T,
         return;
     }
 
-    keygen_from_seed(logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
+    keygen_native_from_seed(logn, &seed, f, g, F, G, t16, tmp_u32, tmp_fxr);
     mq::mqpoly_div_small(logn, f, g, h, t16);
     seed.zeroize();
     encode_keypair(logn, f, g, F, h, sign_key, vrfy_key)
         .expect("random key generation produced an encodable key");
 }
 
-// Internal keygen function:
+// Internal native keygen function:
 //  - processing is deterministic from the provided seed;
-//  - the scalar SHAKE256 PRNG is used regardless of crate features so that
-//    outputs match PQClean/Tidecoin deterministic Falcon key generation;
+//  - this is the native fn-dsa / ntrugen seeded Falcon path, using
+//    shake256x4 when enabled;
 //  - the f, g, F and G polynomials are not encoded, but provided in
 //    raw format (arrays of signed integers);
 //  - the public key h = g/f is not computed (but the function checks
@@ -628,7 +690,8 @@ fn keygen_inner<T: CryptoRng + RngCore>(logn: u32, rng: &mut T,
 //   tmp_u16: n
 //   tmp_u32: 6*n
 //   tmp_fxr: 2.5*n
-fn keygen_from_seed_scalar_prng(logn: u32, seed: &[u8],
+#[cfg_attr(any(feature = "shake256x4", not(test)), allow(dead_code))]
+fn keygen_native_from_seed_scalar_prng(logn: u32, seed: &[u8],
     f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
     tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
 {
@@ -638,7 +701,7 @@ fn keygen_from_seed_scalar_prng(logn: u32, seed: &[u8],
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn keygen_from_seed(logn: u32, seed: &[u8],
+fn keygen_native_from_seed(logn: u32, seed: &[u8],
     f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
     tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
 {
@@ -652,7 +715,7 @@ fn keygen_from_seed(logn: u32, seed: &[u8],
 
     #[cfg(not(feature = "shake256x4"))]
     {
-        keygen_from_seed_scalar_prng(logn, seed, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
+        keygen_native_from_seed_scalar_prng(logn, seed, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
     }
 }
 
@@ -699,7 +762,7 @@ fn keygen_with_prng<P: PRNG>(
     }
 }
 
-// keygen_from_seed() variant, with AVX2 optimizations.
+// keygen_native_from_seed() variant, with AVX2 optimizations.
 #[cfg(all(not(feature = "no_avx2"),
     any(target_arch = "x86_64", target_arch = "x86")))]
 #[target_feature(enable = "avx2")]
@@ -821,23 +884,11 @@ unsafe fn keygen_from_seed_avx2(logn: u32, seed: &[u8],
     }
 }
 
-#[cfg(all(not(feature = "no_avx2"),
-    any(target_arch = "x86_64", target_arch = "x86")))]
-#[target_feature(enable = "avx2")]
-unsafe fn keygen_from_seed_avx2_scalar_prng(logn: u32, seed: &[u8],
-    f: &mut [i8], g: &mut [i8], F: &mut [i8], G: &mut [i8],
-    tmp_u16: &mut [u16], tmp_u32: &mut [u32], tmp_fxr: &mut [fxp::FXR])
-{
-    let mut rng = <shake::SHAKE256_PRNG as PRNG>::new(seed);
-    keygen_from_seed_avx2_with_prng(logn, &mut rng, f, g, F, G, tmp_u16, tmp_u32, tmp_fxr);
-    rng.zeroize();
-}
-
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     // For degrees 256, 512, and 1024, 100 key pairs have been generated
     // with falcon.py from ntrugen; this implementation is supposed to be
@@ -1505,7 +1556,7 @@ mod tests {
                     6
                 };
             let seed = &seed[..seed_len];
-            keygen_from_seed(logn, seed,
+            keygen_native_from_seed(logn, seed,
                 &mut f[..n], &mut g[..n], &mut F[..n], &mut G[..n],
                 &mut t16, &mut t32, &mut tfx);
             for j in 0..n {
@@ -1558,7 +1609,7 @@ mod tests {
             let mut tfx = [fxp::FXR::ZERO; 5 * 512];
             for t in 0..2 {
                 let seed = [logn as u8, t];
-                keygen_from_seed(logn, &seed,
+                keygen_native_from_seed(logn, &seed,
                     &mut f[..n], &mut g[..n], &mut F[..n], &mut G[..n],
                     &mut t16, &mut t32, &mut tfx);
                 for i in 0..(2 * n) {
@@ -1614,6 +1665,42 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_stream_block_matches_tidecoin_pqhd_vectors() {
+        let stream_key_512 = hex::decode(concat!(
+            "1d28d7fc52b10ad564be42667eea7830ffddcd9beb7666966c9e7fd1f0c6769d",
+            "90da93994e186053b4fe6655e9b79aa19306b0994af09d6b77ae141f88cac2e8",
+        )).unwrap();
+        let stream_key_512: [u8; PQHD_KEYGEN_STREAM_SIZE] = stream_key_512.try_into().unwrap();
+        assert_eq!(
+            hex::encode(pqhd_stream_block(&stream_key_512, 0)),
+            concat!(
+                "a826fbc6d97bb72b34628430561b572aca14b6281caeb4fd9fa6b9295f1d711f",
+                "4bbcd9f1d3697afda50b9889216634edc8a4ea7b18126cdc0d754b853474ebd2",
+            ),
+        );
+        assert_eq!(
+            hex::encode(pqhd_stream_block(&stream_key_512, 1)),
+            concat!(
+                "979d62443c10984b5b05af367181c33bb39541b9a1841896858c4df39c5c2347",
+                "e7a452264c58eb756c9bc869106cdf76b8e4615b950cd1608b5052049a220719",
+            ),
+        );
+
+        let stream_key_1024 = hex::decode(concat!(
+            "48f6533a698d804ffdace7b1745129a2185293ecd9f20e90887387d2647fe6e4",
+            "96fca8d42e19e166dfaf5f310d17893e22c38982879a73259db102d99352beb9",
+        )).unwrap();
+        let stream_key_1024: [u8; PQHD_KEYGEN_STREAM_SIZE] = stream_key_1024.try_into().unwrap();
+        assert_eq!(
+            hex::encode(pqhd_stream_block(&stream_key_1024, 0)),
+            concat!(
+                "b2cd31d12b19dafe51f0ac141ba45ab3ed7e54f89a59c4a7e8d452ae6f7a0387",
+                "daf7be04ad7a3eed529d43fe5872108ab0d218ed223ba064fbf2ac169a6a5fb8",
+            ),
+        );
+    }
+
+    #[test]
     fn deterministic_keygen_from_stream_matches_seed_attempt_zero() {
         let mut kg_seed = KeyPairGeneratorStandard::default();
         let mut kg_stream = KeyPairGeneratorStandard::default();
@@ -1625,7 +1712,7 @@ mod tests {
         let block = pqhd_stream_block(&stream_key, 0);
 
         kg_seed
-            .keygen_from_seed(
+            .keygen_from_seed_pqclean(
                 FN_DSA_LOGN_512,
                 &block[..FALCON_KEYGEN_SEED_SIZE],
                 &mut sk_seed,
@@ -1633,7 +1720,7 @@ mod tests {
             )
             .unwrap();
         kg_stream
-            .keygen_from_stream_key(
+            .keygen_from_stream_key_tidecoin(
                 FN_DSA_LOGN_512,
                 &stream_key,
                 &mut sk_stream,
@@ -1646,26 +1733,84 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_native_and_pqclean_seeded_keygen_are_distinct() {
+        let mut kg_native = KeyPairGeneratorStandard::default();
+        let mut kg_pqclean = KeyPairGeneratorStandard::default();
+        let seed = [0u8; FALCON_KEYGEN_SEED_SIZE];
+        let mut sk_native = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_native = [0u8; VRFY_KEY_SIZE_512];
+        let mut sk_pqclean = [0u8; SIGN_KEY_SIZE_512];
+        let mut vk_pqclean = [0u8; VRFY_KEY_SIZE_512];
+
+        kg_native
+            .keygen_from_seed_native(FN_DSA_LOGN_512, &seed, &mut sk_native, &mut vk_native)
+            .unwrap();
+        kg_pqclean
+            .keygen_from_seed_pqclean(FN_DSA_LOGN_512, &seed, &mut sk_pqclean, &mut vk_pqclean)
+            .unwrap();
+
+        assert_ne!(sk_native, sk_pqclean);
+        assert_ne!(vk_native, vk_pqclean);
+    }
+
+    #[test]
+    fn deterministic_keygen_from_stream_matches_tidecoin_hash_vectors() {
+        let vectors = [
+            (
+                FN_DSA_LOGN_512,
+                hex::decode(concat!(
+                    "1d28d7fc52b10ad564be42667eea7830ffddcd9beb7666966c9e7fd1f0c6769d",
+                    "90da93994e186053b4fe6655e9b79aa19306b0994af09d6b77ae141f88cac2e8",
+                )).unwrap(),
+                "cb72ac890ce605a32850b885abcd4e83a3e30bcc68f08eaacc342bfdd30ebba5",
+                "935f9316ecc62adb2b2c5ce7b2b948d848d1884528a79c3162a2e25989e84f35",
+            ),
+            (
+                FN_DSA_LOGN_1024,
+                hex::decode(concat!(
+                    "48f6533a698d804ffdace7b1745129a2185293ecd9f20e90887387d2647fe6e4",
+                    "96fca8d42e19e166dfaf5f310d17893e22c38982879a73259db102d99352beb9",
+                )).unwrap(),
+                "ec638e05cfb547b3315bcd798002e512869782382cbc290561df9435fe2ba7f1",
+                "dcbc3734ce83292c3efede196ac38bbc9b6f92f153974507b86b379415a1d42c",
+            ),
+        ];
+
+        for (logn, stream_key, expected_pk_sha256, expected_sk_sha256) in vectors {
+            let mut kg = KeyPairGeneratorStandard::default();
+            let mut sk = [0u8; SIGN_KEY_SIZE_1024];
+            let mut vk = [0u8; VRFY_KEY_SIZE_1024];
+            let sk = &mut sk[..sign_key_size(logn).unwrap()];
+            let vk = &mut vk[..vrfy_key_size(logn).unwrap()];
+
+            kg.keygen_from_stream_key_tidecoin(logn, &stream_key, sk, vk).unwrap();
+
+            assert_eq!(hex::encode(Sha256::digest(vk)), expected_pk_sha256);
+            assert_eq!(hex::encode(Sha256::digest(sk)), expected_sk_sha256);
+        }
+    }
+
+    #[test]
     fn deterministic_keygen_reports_validation_errors() {
         let mut kg = KeyPairGeneratorStandard::default();
         let mut sk = [0u8; SIGN_KEY_SIZE_512];
         let mut vk = [0u8; VRFY_KEY_SIZE_512];
 
         assert_eq!(
-            kg.keygen_from_seed(8, &[0u8; FALCON_KEYGEN_SEED_SIZE], &mut sk, &mut vk),
+            kg.keygen_from_seed_native(8, &[0u8; FALCON_KEYGEN_SEED_SIZE], &mut sk, &mut vk),
             Err(DeterministicKeyGenError::Validation(
                 KeyGenError::UnsupportedLogN { logn: 8 },
             )),
         );
         assert_eq!(
-            kg.keygen_from_seed(FN_DSA_LOGN_512, &[0u8; FALCON_KEYGEN_SEED_SIZE - 1], &mut sk, &mut vk),
+            kg.keygen_from_seed_pqclean(FN_DSA_LOGN_512, &[0u8; FALCON_KEYGEN_SEED_SIZE - 1], &mut sk, &mut vk),
             Err(DeterministicKeyGenError::InvalidSeedLen {
                 expected: FALCON_KEYGEN_SEED_SIZE,
                 actual: FALCON_KEYGEN_SEED_SIZE - 1,
             }),
         );
         assert_eq!(
-            kg.keygen_from_stream_key(FN_DSA_LOGN_512, &[0u8; PQHD_KEYGEN_STREAM_SIZE - 1], &mut sk, &mut vk),
+            kg.keygen_from_stream_key_tidecoin(FN_DSA_LOGN_512, &[0u8; PQHD_KEYGEN_STREAM_SIZE - 1], &mut sk, &mut vk),
             Err(DeterministicKeyGenError::InvalidStreamKeyLen {
                 expected: PQHD_KEYGEN_STREAM_SIZE,
                 actual: PQHD_KEYGEN_STREAM_SIZE - 1,

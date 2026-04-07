@@ -1,4 +1,6 @@
-# FN-DSA (in Rust)
+# Tide FN-DSA
+
+Tidecoin fork of `rust-fn-dsa`.
 
 FN-DSA is a new *upcoming* post-quantum signature scheme, currently
 being defined by NIST as part of their [Post-Quantum Cryptography
@@ -15,6 +17,37 @@ maintained**, i.e. that keys and signatures obtained with this code may
 cease to be accepted by ulterior versions. Only version 1.0 will provide
 such stability, and it will be published only after publication of the
 final FN-DSA standard.
+
+This fork also adds explicit compatibility support for:
+
+  - original Falcon / PQClean-style profiles
+  - Tidecoin legacy Falcon-512 verification/signing behavior
+  - Tidecoin PQHD deterministic Falcon key derivation
+
+Cargo package names in this fork are `tide-fn-dsa*`. The Rust crate ids
+remain `fn_dsa*`, so downstreams can keep existing import paths by
+renaming dependencies in `Cargo.toml`, for example:
+
+```toml
+[dependencies]
+fn-dsa = { package = "tide-fn-dsa", git = "https://github.com/tidecoin/tide-fn-dsa" }
+```
+
+If you want only the umbrella package, use:
+
+```toml
+[dependencies]
+fn-dsa = { package = "tide-fn-dsa", git = "https://github.com/tidecoin/tide-fn-dsa" }
+```
+
+If you want split packages while keeping existing Rust import paths, use:
+
+```toml
+[dependencies]
+fn-dsa-kgen = { package = "tide-fn-dsa-kgen", git = "https://github.com/tidecoin/tide-fn-dsa" }
+fn-dsa-sign = { package = "tide-fn-dsa-sign", git = "https://github.com/tidecoin/tide-fn-dsa" }
+fn-dsa-vrfy = { package = "tide-fn-dsa-vrfy", git = "https://github.com/tidecoin/tide-fn-dsa" }
+```
 
 ## Sizes
 
@@ -269,20 +302,20 @@ In any case, regenerating the nonce cannot harm security.
 
 ## Usage
 
-The code is split into five crates:
+The code is split into five packages:
 
-  - `fn-dsa` is the toplevel crate; it re-exports all relevant types,
+  - `tide-fn-dsa` is the toplevel package; it re-exports all relevant types,
     constants and functions, and most applications will only need to
-    use that crate. Internally, `fn-dsa` pulls the other four crates
+    use that crate. Internally, `tide-fn-dsa` pulls the other four packages
     as dependencies.
 
-  - `fn-dsa-kgen` implements key pair generation.
+  - `tide-fn-dsa-kgen` implements key pair generation.
 
-  - `fn-dsa-sign` implements signature generation.
+  - `tide-fn-dsa-sign` implements signature generation.
 
-  - `fn-dsa-vrfy` implements signature verification.
+  - `tide-fn-dsa-vrfy` implements signature verification.
 
-  - `fn-dsa-comm` provides some utility functions which are used by
+  - `tide-fn-dsa-comm` provides some utility functions which are used by
     all three other crates.
 
 The main point of this separation is that some applications will need
@@ -328,4 +361,82 @@ match VerifyingKeyStandard::decode(&vrfy_key) {
         // could not decode verifying key
     }
 }
+```
+
+For deterministic Falcon key generation, the seeded APIs are split
+explicitly:
+
+  - `keygen_from_seed_native()` uses the native `fn-dsa` / `ntrugen`
+    seeded Falcon path.
+  - `keygen_from_seed_pqclean()` uses the original
+    PQClean-compatible seeded Falcon path.
+  - `keygen_from_stream_key_tidecoin()` derives Falcon seeds from a
+    64-byte Tidecoin PQHD stream key and then uses the PQClean/Tidecoin
+    compatibility path.
+
+This split is intentional: the same 48-byte Falcon seed does not
+generally produce the same key pair under the native `fn-dsa` seeded
+key generator and the original Falcon/PQClean/Tidecoin seeded key
+generator.
+
+Compatibility-oriented examples:
+
+```rust
+use rand_core::OsRng;
+use fn_dsa::{
+    SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, FN_DSA_LOGN_512,
+    FALCON_KEYGEN_SEED_SIZE, PQHD_KEYGEN_STREAM_SIZE,
+    KeyPairGenerator, KeyPairGeneratorStandard,
+};
+
+let mut kg = KeyPairGeneratorStandard::default();
+let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+
+let seed48 = [0u8; FALCON_KEYGEN_SEED_SIZE];
+kg.keygen_from_seed_pqclean(FN_DSA_LOGN_512, &seed48, &mut sign_key, &mut vrfy_key)?;
+
+let stream_key64 = [0u8; PQHD_KEYGEN_STREAM_SIZE];
+kg.keygen_from_stream_key_tidecoin(
+    FN_DSA_LOGN_512,
+    &stream_key64,
+    &mut sign_key,
+    &mut vrfy_key,
+)?;
+
+// The native deterministic Falcon path is separate on purpose.
+kg.keygen_from_seed_native(FN_DSA_LOGN_512, &seed48, &mut sign_key, &mut vrfy_key)?;
+# let _ = OsRng;
+```
+
+```rust
+use rand_core::OsRng;
+use fn_dsa::{
+    SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, TIDECOIN_LEGACY_FALCON512_SIG_MAX,
+    FN_DSA_LOGN_512, FalconProfile,
+    KeyPairGenerator, KeyPairGeneratorStandard,
+    SigningKey, SigningKeyStandard,
+    VerifyingKey, VerifyingKeyStandard,
+};
+
+let mut kg = KeyPairGeneratorStandard::default();
+let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+kg.keygen(FN_DSA_LOGN_512, &mut OsRng, &mut sign_key, &mut vrfy_key)?;
+
+let mut sk = SigningKeyStandard::decode(&sign_key).expect("valid signing key");
+let vk = VerifyingKeyStandard::decode(&vrfy_key).expect("valid verifying key");
+
+let mut sig = [0u8; TIDECOIN_LEGACY_FALCON512_SIG_MAX];
+let sig_len = sk.sign_falcon(
+    &mut OsRng,
+    FalconProfile::TidecoinLegacyFalcon512,
+    b"message",
+    &mut sig,
+)?;
+assert!(vk.verify_falcon(
+    FalconProfile::TidecoinLegacyFalcon512,
+    &sig[..sig_len],
+    b"message",
+));
 ```

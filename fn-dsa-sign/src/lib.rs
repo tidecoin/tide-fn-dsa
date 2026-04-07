@@ -87,7 +87,8 @@
 //! #     }
 //! # }
 //! 
-//! let encoded_signing_key = [0u8; SIGN_KEY_SIZE_512];
+//! // Load a valid encoded signing key from storage or key generation.
+//! # let encoded_signing_key: [u8; SIGN_KEY_SIZE_512] = todo!();
 //! let mut sk = SigningKeyStandard::decode(&encoded_signing_key)
 //!     .expect("valid signing key bytes");
 //! let mut sig = [0u8; SIGNATURE_SIZE_512];

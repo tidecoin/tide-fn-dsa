@@ -1,9 +1,9 @@
 [package]
-name = "fn-dsa"
-version = "0.3.0"
+name = "tide-fn-dsa"
+version = "0.4.0"
 authors.workspace = true
 categories.workspace = true
-description.workspace = true
+description = "Tidecoin umbrella package for FN-DSA, PQClean Falcon, and Tidecoin legacy Falcon support"
 edition.workspace = true
 keywords.workspace = true
 license.workspace = true
@@ -11,11 +11,14 @@ readme.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "fn_dsa"
+
 [dependencies]
-fn-dsa-comm = { version = "0.3", path = "../fn-dsa-comm" }
-fn-dsa-kgen = { version = "0.3", path = "../fn-dsa-kgen" }
-fn-dsa-sign = { version = "0.3", path = "../fn-dsa-sign" }
-fn-dsa-vrfy = { version = "0.3", path = "../fn-dsa-vrfy" }
+fn-dsa-comm = { package = "tide-fn-dsa-comm", version = "0.4", path = "../fn-dsa-comm" }
+fn-dsa-kgen = { package = "tide-fn-dsa-kgen", version = "0.4", path = "../fn-dsa-kgen" }
+fn-dsa-sign = { package = "tide-fn-dsa-sign", version = "0.4", path = "../fn-dsa-sign" }
+fn-dsa-vrfy = { package = "tide-fn-dsa-vrfy", version = "0.4", path = "../fn-dsa-vrfy" }
 
 [dev-dependencies]
 hex.workspace = true

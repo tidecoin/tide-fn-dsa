@@ -1,9 +1,9 @@
 [package]
-name = "fn-dsa-vrfy"
-version = "0.3.0"
+name = "tide-fn-dsa-vrfy"
+version = "0.4.0"
 authors.workspace = true
 categories.workspace = true
-description.workspace = true
+description = "Tidecoin FN-DSA and Falcon signature verification, including PQClean and Tidecoin legacy Falcon profiles"
 edition.workspace = true
 keywords.workspace = true
 license.workspace = true
@@ -11,8 +11,11 @@ readme.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "fn_dsa_vrfy"
+
 [dependencies]
-fn-dsa-comm = { version = "0.3", path = "../fn-dsa-comm" }
+fn-dsa-comm = { package = "tide-fn-dsa-comm", version = "0.4", path = "../fn-dsa-comm" }
 
 [dev-dependencies]
 hex.workspace = true

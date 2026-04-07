@@ -59,11 +59,16 @@
 //!
 //! ## Example usage
 //!
-//! For Tidecoin/PQClean-compatible deterministic Falcon key derivation,
-//! use `keygen_from_seed()` or `keygen_from_stream_key()` on the Falcon
-//! key generators. These deterministic APIs intentionally pin the scalar
-//! SHAKE256 seed-expansion path so that outputs are stable regardless of
-//! whether the `shake256x4` feature is enabled.
+//! For deterministic Falcon key derivation, there are now two explicit
+//! seeded key-generation families on the Falcon key generators:
+//!
+//!  - `keygen_from_seed_native()` uses the native `fn-dsa` / `ntrugen`
+//!    seeded Falcon path.
+//!  - `keygen_from_seed_pqclean()` and `keygen_from_stream_key_tidecoin()`
+//!    use PQClean/Tidecoin-compatible seeded Falcon key generation.
+//!
+//! These APIs are intentionally separate because the same 48-byte seed
+//! does not map to the same Falcon key pair in the two families.
 //!
 //! ```no_run
 //! use fn_dsa::{
@@ -109,16 +114,14 @@
 //!     .unwrap();
 //! 
 //! // Sign a message with the signing key.
-//! let encoded_signing_key = [0u8; SIGN_KEY_SIZE_512];
-//! let mut sk = SigningKeyStandard::decode(&encoded_signing_key)
+//! let mut sk = SigningKeyStandard::decode(&sign_key)
 //!     .expect("valid signing key bytes");
 //! let mut sig = [0u8; SIGNATURE_SIZE_512];
 //! sk.sign(&mut rng, &DOMAIN_NONE, &HASH_ID_RAW, b"message", &mut sig)
 //!     .unwrap();
 //! 
 //! // Verify a signature with the verifying key.
-//! let encoded_verifying_key = [0u8; VRFY_KEY_SIZE_512];
-//! match VerifyingKeyStandard::decode(&encoded_verifying_key) {
+//! match VerifyingKeyStandard::decode(&vrfy_key) {
 //!     Some(vk) => {
 //!         if vk.verify(&sig, &DOMAIN_NONE, &HASH_ID_RAW, b"message") {
 //!             // signature is valid
@@ -130,6 +133,67 @@
 //!         // could not decode verifying key
 //!     }
 //! }
+//! ```
+//!
+//! Falcon compatibility APIs are also exposed explicitly:
+//!
+//! ```no_run
+//! use fn_dsa::{
+//!     SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512, TIDECOIN_LEGACY_FALCON512_SIG_MAX,
+//!     FN_DSA_LOGN_512, FalconProfile,
+//!     KeyPairGenerator, KeyPairGeneratorStandard,
+//!     SigningKey, SigningKeyStandard,
+//!     VerifyingKey, VerifyingKeyStandard,
+//!     CryptoRng, RngCore, RngError,
+//! };
+//! #
+//! # struct DemoRng(u64);
+//! # impl CryptoRng for DemoRng {}
+//! # impl RngCore for DemoRng {
+//! #     fn next_u32(&mut self) -> u32 {
+//! #         let x = self.0 as u32;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn next_u64(&mut self) -> u64 {
+//! #         let x = self.0;
+//! #         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+//! #         x
+//! #     }
+//! #     fn fill_bytes(&mut self, dest: &mut [u8]) {
+//! #         for chunk in dest.chunks_mut(8) {
+//! #             let bytes = self.next_u64().to_le_bytes();
+//! #             let len = chunk.len();
+//! #             chunk.copy_from_slice(&bytes[..len]);
+//! #         }
+//! #     }
+//! #     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+//! #         self.fill_bytes(dest);
+//! #         Ok(())
+//! #     }
+//! # }
+//!
+//! let mut rng = DemoRng(7);
+//! let mut kg = KeyPairGeneratorStandard::default();
+//! let mut sign_key = [0u8; SIGN_KEY_SIZE_512];
+//! let mut vrfy_key = [0u8; VRFY_KEY_SIZE_512];
+//! kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sign_key, &mut vrfy_key)
+//!     .unwrap();
+//!
+//! let mut sk = SigningKeyStandard::decode(&sign_key).unwrap();
+//! let vk = VerifyingKeyStandard::decode(&vrfy_key).unwrap();
+//! let mut sig = [0u8; TIDECOIN_LEGACY_FALCON512_SIG_MAX];
+//! let sig_len = sk.sign_falcon(
+//!     &mut rng,
+//!     FalconProfile::TidecoinLegacyFalcon512,
+//!     b"message",
+//!     &mut sig,
+//! ).unwrap();
+//! assert!(vk.verify_falcon(
+//!     FalconProfile::TidecoinLegacyFalcon512,
+//!     &sig[..sig_len],
+//!     b"message",
+//! ));
 //! ```
 //!
 //! [fn-dsa-kgen]: https://crates.io/crates/fn_dsa_kgen

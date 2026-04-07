@@ -1,23 +1,32 @@
 #![no_std]
 
-//! This crate contains utility functions which are used by FN-DSA for
-//! key pair generation, signing, and verifying. It is not meant to
-//! be used directly.
+//! This crate contains low-level utility functions which are used by the
+//! sibling FN-DSA crates for key pair generation, signing, and verifying.
+//! It is public only because these crates are split at the Cargo level;
+//! applications should normally depend on `fn-dsa`, `fn-dsa-kgen`,
+//! `fn-dsa-sign`, or `fn-dsa-vrfy` instead.
+//!
+//! The modules exposed here are implementation-level building blocks, not a
+//! stable application-facing API surface.
 
 use core::fmt;
 
 /// Encoding/decoding primitives.
+#[doc(hidden)]
 pub mod codec;
 
 /// Computations with polynomials modulo X^n+1 and modulo q = 12289.
+#[doc(hidden)]
 pub mod mq;
 
 /// SHAKE implementation.
+#[doc(hidden)]
 pub mod shake;
 
 /// Specialized versions of `mq` which use AVX2 opcodes (on x86 CPUs).
 #[cfg(all(not(feature = "no_avx2"),
     any(target_arch = "x86_64", target_arch = "x86")))]
+#[doc(hidden)]
 pub mod mq_avx2;
 
 // Re-export RNG traits to get a smooth dependency management.

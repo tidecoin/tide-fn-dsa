@@ -560,6 +560,150 @@ mod tests {
         verify_kat_inner(&KAT_ORIG_1024);
     }
 
+    #[test]
+    fn node_legacy_boundary_fixture_spans_strict_and_legacy_bounds() {
+        // Frozen Tidecoin node fixture from script_tests.cpp /
+        // script_tests_pq.json. The message is the legacy SIGHASH_ALL digest
+        // for the tiny dummy transaction used by that test.
+        let e_pub = hex::decode(concat!(
+            "097331437ba2d5b13b76c3965f110fbdb4c0c954dc611d54f55bbbe4139c75d0",
+            "740d08fd3ece36817e982da4cc0fba304df1b8d92f790d939a241004b7785ac7",
+            "93401e5b924760340d8983e38ba35e455f58e6af517550a4ea602c7b73beb421",
+            "8147cc973ca998446e073c918050e80ca3437eeb9bcd473225a8e4c06e841bac",
+            "61cd90b2e7124b62cfcab1130d8976b1a871ae833b01db1156048411ca19a20b",
+            "1a7a9e56818353c1ffa0d54b2b9028f8899d1ab327a7606e90a154b6ec8d3e8e",
+            "9c5075a26f276494a2ea01ec0ae2a627e8e59e8bdcca21c757bfb18a46482dad",
+            "1c813d7af8be9ec71511bacbf0642e4d10ef67969be936b0cecba15d4300e00c",
+            "ca12e9f03a5eb5036094ba076e6da50451ff582677300a169a8df8f9d47021c9",
+            "09403b55649c45bf02c2382f9b429ca43ea0a708d139ad6010f8c0313ed8c7f0",
+            "0a558f708209078c09f1b9cde5f75124c150ea537acc6668209eefd3c0443e45",
+            "1e7561cba3b315753ddad8652ca706c4d038538105ad9e5517dc1b94a259e839",
+            "83086608248a5a13332b445a88b384ac58580da231120f7a617aa1c41fea6350",
+            "1f529c6d54750e36482ede1134aaa1324e46ec636c8a4145ea56028da0626952",
+            "646ba1ae40a847b46598db48e19c0510edfee914834678b80f60c34d35b5d511",
+            "5350ab73726aa8a538072c1bc1ba38b0da1b33fcc766f554beb4e62d8769afbc",
+            "b09078a413a986a276d4016e1c0314e86632c855d218a1a3254e4a011a654f86",
+            "118ec82cc65cc2f4c305bec54851e3c7dc5b1086c4211107b6f13c0025478f40",
+            "b0fe914b4c225890b0963707b594a979a0265a1592e85b71c321b327c2cd5bae",
+            "e10b3b6e132012ac40434a59e9b992db7866c6181b5afe82e2f07154afb2806c",
+            "39755f6d07afdc4a9baf92e67d7190d89900a52a9563994c6ad03d8e0040082b",
+            "673bb449d787a0d589f842ea66a4553c94d859791a6b5862837b16e3fd2b5837",
+            "5174817f21b01f370f9fd0ab3e4c8a63a83fafd530196cef9772fe66ca5f1321",
+            "779aed2a5c427624f06394f84be739b9f49b11eb5e5aa4f5967c0909124c426b",
+            "e316c31045952232c2e1a5004cb9ed881c49c236b33e8724584de629a3a20013",
+            "81e213cd497289ea4f7a0c627e6c71f9688215fe2682b7531d1f6a207aebd403",
+            "4cca612577c27049650fc44aa68f554bb648cfb3ef841a92a2a6b674c67a9bea",
+            "9dc1866cb9986251b80f29449fc1ae35ba986b9798d5c05addca6666b4532a8a",
+            "07",
+        )).unwrap();
+        let e_msg = hex::decode(
+            "149aae8f1f84ce36bc07ab45829441e7ed7a17e2afbf70dca5933150098fd0ce",
+        ).unwrap();
+        let mut e_sig = hex::decode(concat!(
+            "390d01e92ed24a254e9b7536a54b3567105edbcaa3b0de653bf5253a246631aa",
+            "574d951b71021cbfcaf6e174231d8e2600d8413bf98606708d75b976a663d307",
+            "3796fc6418c12d122c5b176c7cac5ad6133d505c50fc9c0520788e451176e6ac",
+            "e826fa084bde083505b6a72893628b3cb9b833654fb3f378516dcc2c70784828",
+            "e19009146d5fc3221fa701d3f4ec1f83f3efd6a0f6cac5dd1d7a635236d742af",
+            "54dd8bfb44555c3b3be3d410bb6ad7698139888358852084dda5d499f8aed9bd",
+            "cddbd39b8df8e62ed72ac1639f5b1355f6bc485be393b88f4aa002650739f92c",
+            "1ec3bcddd567678cdf885a59859b46f4cfbd6a6f0c23397a163243f8f94b36d7",
+            "730f089cd2a9fe6d8cb73b1c2dd9a29fea84747a74554f5ccea21d4a8e124f97",
+            "41e43f9a166fee8ce5c5fa69692e890e55157bd0da7e1d68a5ef97098b449b60",
+            "8eabfc581f062d5a1144f58b9629527ec11a4c921c41ddbb4036923e7efc7c58",
+            "e18b81a3440d8976f5750dbdb2d9f4ce756719137731a428ec01864d5883306c",
+            "350e4e617e2fa93388f3ca65e4c887aa274e58261cab68f2a278952a078a62b6",
+            "7e25bb3348631190c3542bc21cd8b273b3c1d543afb1dc32b8d20d5f2623b87a",
+            "9ddae73a1ecfee73c99b3d2b605f57e65c5f6912b699a65059bfbf515f97a53b",
+            "cb4c094f507cd2426535c830eaf310824ac93d47d10c28eefca68234d398ee3f",
+            "6069640f543eedb6266a61a7e227738982e1fccc909a7e1aced453fd5e141ce7",
+            "4a3a0e22e143da3eb1c2adec836dd99cc354d8565a4a5bb741dd570eba9efba4",
+            "c32680b3f6c58ef44d5f15949e47693a22488a8a84ec88903b34c2c47a574c2e",
+            "79b16730893ad3e5c3a30fc30e3868e1b06b4c35af88a14949cd6b79188de3d6",
+            "838c968c6a452044623b3ba62ebd19fec6311001",
+        )).unwrap();
+        assert_eq!(e_sig.pop(), Some(0x01));
+
+        let vk = VerifyingKeyStandard::decode(&e_pub).unwrap();
+        assert!(!vk.verify_falcon(FalconProfile::PqClean, &e_sig, &e_msg));
+        assert!(vk.verify_falcon(FalconProfile::TidecoinLegacyFalcon512, &e_sig, &e_msg));
+
+        let logn = vk.logn;
+        assert_eq!(logn, 9);
+        let n = 1usize << logn;
+        let mut s2i = [0i16; 1 << 10];
+        let mut tmp_u16 = [0u16; 2 << 10];
+        let (t1, rest) = tmp_u16.split_at_mut(n);
+        let (t2, _) = rest.split_at_mut(n);
+
+        codec::comp_decode(&e_sig[(1 + FALCON_NONCE_LEN)..], &mut s2i[..n]).unwrap();
+        let norm2 = mq::signed_poly_sqnorm(logn, &s2i[..n]);
+
+        hash_to_point_falcon(&e_sig[1..(1 + FALCON_NONCE_LEN)], &e_msg, t1).unwrap();
+        mq::mqpoly_ext_to_int(logn, t1);
+        mq::mqpoly_signed_to_ext(logn, &s2i[..n], t2);
+        mq::mqpoly_ext_to_int(logn, t2);
+        mq::mqpoly_int_to_NTT(logn, t2);
+        mq::mqpoly_mul_ntt(logn, t2, &vk.h[..n]);
+        mq::mqpoly_NTT_to_int(logn, t2);
+        mq::mqpoly_sub_int(logn, t1, t2);
+        mq::mqpoly_int_to_ext(logn, t1);
+        let norm1 = mq::mqpoly_sqnorm(logn, &*t1);
+        assert!(norm1 < norm2.wrapping_neg());
+
+        let sqnorm = norm1 + norm2;
+        let strict_bound = mq::SQBETA[logn as usize];
+        let legacy_bound =
+            falcon_profile_norm_bound(FalconProfile::TidecoinLegacyFalcon512, logn).unwrap();
+        assert!(sqnorm > strict_bound);
+        assert!(sqnorm < legacy_bound);
+
+        let mut tmp_i16 = [0i16; 1 << 10];
+        let mut tmp_u16 = [0u16; 2 << 10];
+        assert!(!verify_falcon_inner(
+            FalconProfile::PqClean,
+            logn,
+            &vk.h[..n],
+            &e_sig,
+            &e_msg,
+            &mut tmp_i16[..n],
+            &mut tmp_u16[..(2 * n)],
+        ));
+        assert!(verify_falcon_inner(
+            FalconProfile::TidecoinLegacyFalcon512,
+            logn,
+            &vk.h[..n],
+            &e_sig,
+            &e_msg,
+            &mut tmp_i16[..n],
+            &mut tmp_u16[..(2 * n)],
+        ));
+        #[cfg(all(not(feature = "no_avx2"),
+            any(target_arch = "x86_64", target_arch = "x86")))]
+        if fn_dsa_comm::has_avx2() {
+            unsafe {
+                assert!(!verify_falcon_avx2_inner(
+                    FalconProfile::PqClean,
+                    logn,
+                    &vk.h[..n],
+                    &e_sig,
+                    &e_msg,
+                    &mut tmp_i16[..n],
+                    &mut tmp_u16[..(2 * n)],
+                ));
+                assert!(verify_falcon_avx2_inner(
+                    FalconProfile::TidecoinLegacyFalcon512,
+                    logn,
+                    &vk.h[..n],
+                    &e_sig,
+                    &e_msg,
+                    &mut tmp_i16[..n],
+                    &mut tmp_u16[..(2 * n)],
+                ));
+            }
+        }
+    }
+
     fn verify_kat_inner(kat: &[&str]) {
         for i in 0..(kat.len() / 3) {
             let e_pub = hex::decode(kat[3 * i]).unwrap();
