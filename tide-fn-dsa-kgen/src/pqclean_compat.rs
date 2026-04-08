@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+#[cfg(test)]
+extern crate alloc;
+
 use tide_fn_dsa_comm::codec;
 use tide_fn_dsa_comm::mq;
 use tide_fn_dsa_comm::shake::SHAKE256;
@@ -9,13 +12,20 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::fxp::FXR;
 use crate::ntru;
+use crate::pqclean_float::{
+    flr_to_f64, iFFT, poly_adj_fft, poly_invnorm2_fft, poly_mul_autoadj_fft, poly_mulconst,
+    poly_set_small, FFT, FLR,
+};
+use crate::pqclean_ntru;
+use crate::PqcleanCandidateDebug;
 use crate::FALCON_KEYGEN_SEED_SIZE;
 
 const MAX_FALCON_N: usize = 1024;
 const TMP_I8_LEN: usize = 4 * MAX_FALCON_N;
 const TMP_U16_LEN: usize = 2 * MAX_FALCON_N;
-const TMP_U32_LEN: usize = 6 * MAX_FALCON_N;
+const TMP_U32_LEN: usize = 9 * MAX_FALCON_N;
 const TMP_FXR_LEN: usize = 3 * MAX_FALCON_N;
+const TMP_FLR_LEN: usize = 5 * MAX_FALCON_N;
 
 // CDT table for discrete Gaussian sampling over Z with standard
 // deviation ~1.17*sqrt(q/2N) for N=1024, q=12289.
@@ -118,8 +128,7 @@ fn coeffs_within_bound(f: &[i8], g: &[i8], bound: i32) -> bool {
     for i in 0..f.len() {
         let xf = f[i] as i32;
         let xg = g[i] as i32;
-        reject |= ((xf >= bound || xf <= -bound) as u32)
-            | ((xg >= bound || xg <= -bound) as u32);
+        reject |= ((xf >= bound || xf <= -bound) as u32) | ((xg >= bound || xg <= -bound) as u32);
     }
     reject == 0
 }
@@ -133,6 +142,33 @@ fn squared_fg_norm(f: &[i8], g: &[i8]) -> u32 {
         sn = sn.wrapping_add((xf * xf + xg * xg) as u32);
     }
     sn
+}
+
+fn check_ortho_norm_pqclean(logn: u32, f: &[i8], g: &[i8], tmp: &mut [FLR]) -> bool {
+    let n = 1usize << logn;
+    let (rt1, rest) = tmp.split_at_mut(n);
+    let (rt2, rt3) = rest.split_at_mut(n);
+
+    poly_set_small(logn, rt1, f);
+    poly_set_small(logn, rt2, g);
+    FFT(logn, rt1);
+    FFT(logn, rt2);
+    poly_invnorm2_fft(logn, rt3, rt1, rt2);
+    poly_adj_fft(logn, rt1);
+    poly_adj_fft(logn, rt2);
+    poly_mulconst(logn, rt1, FLR::from_i32(12289));
+    poly_mulconst(logn, rt2, FLR::from_i32(12289));
+    poly_mul_autoadj_fft(logn, rt1, rt3);
+    poly_mul_autoadj_fft(logn, rt2, rt3);
+    iFFT(logn, rt1);
+    iFFT(logn, rt2);
+
+    let mut bnorm = FLR::ZERO;
+    for u in 0..n {
+        bnorm += rt1[u].square() + rt2[u].square();
+    }
+    let bnorm_max = FLR::decode(&4670353323383631276u64.to_le_bytes()).unwrap();
+    flr_to_f64(bnorm) < flr_to_f64(bnorm_max)
 }
 
 fn encode_pqclean_keypair(
@@ -154,6 +190,144 @@ fn encode_pqclean_keypair(
     vrfy_key[0] = logn as u8;
     let j = 1 + codec::modq_encode(h, &mut vrfy_key[1..]).unwrap();
     debug_assert!(j == vrfy_key.len());
+}
+
+fn eval_pqclean_candidate(
+    logn: u32,
+    f: &[i8],
+    g: &[i8],
+    tmp_u16: &mut [u16],
+    tmp_u32: &mut [u32],
+    tmp_fxr: &mut [FXR],
+    tmp_flr: &mut [FLR],
+) -> PqcleanCandidateDebug {
+    let n = 1usize << logn;
+    let bound = 1i32 << (nbits_fg(logn) - 1);
+    let within_bound = coeffs_within_bound(f, g, bound);
+    let within_norm = squared_fg_norm(f, g) < 16823;
+    let ortho_ok = within_bound
+        && within_norm
+        && check_ortho_norm_pqclean(logn, f, g, &mut tmp_flr[..(3 * n)]);
+    let invertible = ortho_ok && mq::mqpoly_small_is_invertible(logn, f, &mut tmp_u16[..n]);
+    let mut cap_f = [0i8; MAX_FALCON_N];
+    let mut cap_g = [0i8; MAX_FALCON_N];
+    let solve_stage = if ortho_ok {
+        if logn >= 9 {
+            pqclean_ntru::debug_solve_NTRU_stage(
+                logn,
+                f,
+                g,
+                &mut cap_f[..n],
+                &mut cap_g[..n],
+                &mut tmp_u32[..(9 * n)],
+                &mut tmp_flr[..(5 * n)],
+            )
+        } else {
+            ntru::debug_solve_NTRU_stage(
+                logn,
+                f,
+                g,
+                &mut cap_f[..n],
+                &mut cap_g[..n],
+                &mut tmp_u32[..(6 * n)],
+                &mut tmp_fxr[..(3 * n)],
+            )
+        }
+    } else {
+        0xFFFF_FFFF
+    };
+
+    PqcleanCandidateDebug {
+        within_bound,
+        within_norm,
+        invertible,
+        ortho_ok,
+        solve_ok: solve_stage == 0,
+        solve_stage,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn debug_attempts_for_seed(
+    logn: u32,
+    seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
+    max_attempts: usize,
+) -> (usize, Option<PqcleanCandidateDebug>) {
+    let n = 1usize << logn;
+    let mut shake = SHAKE256::new();
+    shake.inject(seed).unwrap();
+    shake.flip().unwrap();
+
+    let mut tmp_i8 = [0i8; TMP_I8_LEN];
+    let mut tmp_u16 = [0u16; TMP_U16_LEN];
+    let mut tmp_u32 = [0u32; TMP_U32_LEN];
+    let mut tmp_fxr = [FXR::ZERO; TMP_FXR_LEN];
+    let mut tmp_flr = [FLR::ZERO; TMP_FLR_LEN];
+    let (f, rest) = tmp_i8[..(2 * n)].split_at_mut(n);
+    let (g, _) = rest.split_at_mut(n);
+    let mut last = None;
+
+    for attempt in 1..=max_attempts {
+        poly_small_mkgauss(&mut shake, logn, f);
+        poly_small_mkgauss(&mut shake, logn, g);
+        let dbg = eval_pqclean_candidate(
+            logn,
+            f,
+            g,
+            &mut tmp_u16[..],
+            &mut tmp_u32[..],
+            &mut tmp_fxr[..],
+            &mut tmp_flr[..],
+        );
+        let solve_ok = dbg.solve_ok;
+        last = Some(dbg);
+        if solve_ok {
+            return (attempt, last);
+        }
+    }
+
+    (max_attempts, last)
+}
+
+#[cfg(test)]
+pub(crate) fn debug_trace_for_seed(
+    logn: u32,
+    seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
+    max_attempts: usize,
+) -> alloc::vec::Vec<PqcleanCandidateDebug> {
+    let n = 1usize << logn;
+    let mut shake = SHAKE256::new();
+    shake.inject(seed).unwrap();
+    shake.flip().unwrap();
+
+    let mut tmp_i8 = [0i8; TMP_I8_LEN];
+    let mut tmp_u16 = [0u16; TMP_U16_LEN];
+    let mut tmp_u32 = [0u32; TMP_U32_LEN];
+    let mut tmp_fxr = [FXR::ZERO; TMP_FXR_LEN];
+    let mut tmp_flr = [FLR::ZERO; TMP_FLR_LEN];
+    let (f, rest) = tmp_i8.split_at_mut(n);
+    let (g, _) = rest.split_at_mut(n);
+    let mut out = alloc::vec::Vec::with_capacity(max_attempts);
+
+    for _ in 0..max_attempts {
+        poly_small_mkgauss(&mut shake, logn, f);
+        poly_small_mkgauss(&mut shake, logn, g);
+        let dbg = eval_pqclean_candidate(
+            logn,
+            f,
+            g,
+            &mut tmp_u16,
+            &mut tmp_u32,
+            &mut tmp_fxr,
+            &mut tmp_flr,
+        );
+        let solved = dbg.solve_ok;
+        out.push(dbg);
+        if solved {
+            break;
+        }
+    }
+    out
 }
 
 pub(crate) fn keygen_pqclean(
@@ -184,6 +358,7 @@ pub(crate) fn keygen_pqclean(
     let mut tmp_u16 = Zeroizing::new([0u16; TMP_U16_LEN]);
     let mut tmp_u32 = Zeroizing::new([0u32; TMP_U32_LEN]);
     let mut tmp_fxr = Zeroizing::new([FXR::ZERO; TMP_FXR_LEN]);
+    let mut tmp_flr = Zeroizing::new([FLR::ZERO; TMP_FLR_LEN]);
 
     let (f, rest) = tmp_i8[..4 * n].split_at_mut(n);
     let (g, rest) = rest.split_at_mut(n);
@@ -203,21 +378,34 @@ pub(crate) fn keygen_pqclean(
             continue;
         }
 
+        if !check_ortho_norm_pqclean(logn, f, g, &mut tmp_flr[..(3 * n)]) {
+            continue;
+        }
         if !mq::mqpoly_small_is_invertible(logn, f, t16) {
             continue;
         }
-        if !ntru::check_ortho_norm(logn, f, g, &mut tmp_fxr[..(3 * n)]) {
-            continue;
-        }
-        if !ntru::solve_NTRU(
-            logn,
-            f,
-            g,
-            cap_f,
-            cap_g,
-            &mut tmp_u32[..(6 * n)],
-            &mut tmp_fxr[..(3 * n)],
-        ) {
+        let solve_ok = if logn >= 9 {
+            pqclean_ntru::solve_NTRU(
+                logn,
+                f,
+                g,
+                cap_f,
+                cap_g,
+                &mut tmp_u32[..(9 * n)],
+                &mut tmp_flr[..(5 * n)],
+            )
+        } else {
+            ntru::solve_NTRU(
+                logn,
+                f,
+                g,
+                cap_f,
+                cap_g,
+                &mut tmp_u32[..(6 * n)],
+                &mut tmp_fxr[..(3 * n)],
+            )
+        };
+        if !solve_ok {
             continue;
         }
 

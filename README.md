@@ -137,11 +137,13 @@ features can be enabled directly on that crate:
     floating-point divisions. This feature was included because some
     RISC-V cores, in particular the SiFive U74, have constant-time
     additions and multiplications, but division cost varies depending on
-    the input operands.
+    the input operands. On non-`riscv64` targets this feature has no
+    effect.
 
   - `sqrt_emu`: this is similar to `div_emu` but for the square root
     operation. On the SiFive U74, enabling both `div_emu` and `sqrt_emu`
-    increases the cost of signature generation by about 25%.
+    increases the cost of signature generation by about 25%. On
+    non-`riscv64` targets this feature has no effect.
 
   - `small_context`: reduce the in-memory size of the signature generator
     context (`SigningKey` instance); for the largest degree (n = 1024),
