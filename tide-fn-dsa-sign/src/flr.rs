@@ -67,8 +67,7 @@ use zeroize::DefaultIsZeroes;
     target_arch = "x86_64",
     target_arch = "aarch64",
     target_arch = "arm64ec",
-    target_arch = "riscv64"
-))]
+    target_arch = "riscv64"))]
 #[path = "flr_native.rs"]
 mod backend;
 
@@ -76,8 +75,7 @@ mod backend;
     target_arch = "x86_64",
     target_arch = "aarch64",
     target_arch = "arm64ec",
-    target_arch = "riscv64"
-)))]
+    target_arch = "riscv64")))]
 #[path = "flr_emu.rs"]
 mod backend;
 
@@ -89,7 +87,7 @@ impl Default for FLR {
     }
 }
 
-impl DefaultIsZeroes for FLR {}
+impl DefaultIsZeroes for FLR { }
 
 impl Add<FLR> for FLR {
     type Output = FLR;
@@ -349,8 +347,8 @@ impl SubAssign<&FLR> for FLR {
 mod tests {
 
     use super::*;
-    use crate::tests::SHAKE256x4;
     use tide_fn_dsa_comm::shake::SHAKE256;
+    use crate::tests::SHAKE256x4;
 
     fn rand_u64(rng: &mut SHAKE256x4) -> u64 {
         let mut x = 0;
@@ -461,11 +459,7 @@ mod tests {
         let mut buf = [0u8; 32];
         sh.flip().unwrap();
         sh.extract(&mut buf).unwrap();
-        assert!(
-            buf[..]
-                == hex::decode("54ada30bdb43e1f14465d944f2a665ca7eaa6e9678e9d035b0fcb8167efe9871")
-                    .unwrap()
-        );
+        assert!(buf[..] == hex::decode("54ada30bdb43e1f14465d944f2a665ca7eaa6e9678e9d035b0fcb8167efe9871").unwrap());
     }
 }
 

@@ -1,9 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-#[cfg(test)]
-extern crate alloc;
-
 use tide_fn_dsa_comm::codec;
 use tide_fn_dsa_comm::mq;
 use tide_fn_dsa_comm::shake::SHAKE256;
@@ -17,7 +14,6 @@ use crate::pqclean_float::{
     poly_set_small, FFT, FLR,
 };
 use crate::pqclean_ntru;
-use crate::PqcleanCandidateDebug;
 use crate::FALCON_KEYGEN_SEED_SIZE;
 
 const MAX_FALCON_N: usize = 1024;
@@ -190,144 +186,6 @@ fn encode_pqclean_keypair(
     vrfy_key[0] = logn as u8;
     let j = 1 + codec::modq_encode(h, &mut vrfy_key[1..]).unwrap();
     debug_assert!(j == vrfy_key.len());
-}
-
-fn eval_pqclean_candidate(
-    logn: u32,
-    f: &[i8],
-    g: &[i8],
-    tmp_u16: &mut [u16],
-    tmp_u32: &mut [u32],
-    tmp_fxr: &mut [FXR],
-    tmp_flr: &mut [FLR],
-) -> PqcleanCandidateDebug {
-    let n = 1usize << logn;
-    let bound = 1i32 << (nbits_fg(logn) - 1);
-    let within_bound = coeffs_within_bound(f, g, bound);
-    let within_norm = squared_fg_norm(f, g) < 16823;
-    let ortho_ok = within_bound
-        && within_norm
-        && check_ortho_norm_pqclean(logn, f, g, &mut tmp_flr[..(3 * n)]);
-    let invertible = ortho_ok && mq::mqpoly_small_is_invertible(logn, f, &mut tmp_u16[..n]);
-    let mut cap_f = [0i8; MAX_FALCON_N];
-    let mut cap_g = [0i8; MAX_FALCON_N];
-    let solve_stage = if ortho_ok {
-        if logn >= 9 {
-            pqclean_ntru::debug_solve_NTRU_stage(
-                logn,
-                f,
-                g,
-                &mut cap_f[..n],
-                &mut cap_g[..n],
-                &mut tmp_u32[..(9 * n)],
-                &mut tmp_flr[..(5 * n)],
-            )
-        } else {
-            ntru::debug_solve_NTRU_stage(
-                logn,
-                f,
-                g,
-                &mut cap_f[..n],
-                &mut cap_g[..n],
-                &mut tmp_u32[..(6 * n)],
-                &mut tmp_fxr[..(3 * n)],
-            )
-        }
-    } else {
-        0xFFFF_FFFF
-    };
-
-    PqcleanCandidateDebug {
-        within_bound,
-        within_norm,
-        invertible,
-        ortho_ok,
-        solve_ok: solve_stage == 0,
-        solve_stage,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn debug_attempts_for_seed(
-    logn: u32,
-    seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
-    max_attempts: usize,
-) -> (usize, Option<PqcleanCandidateDebug>) {
-    let n = 1usize << logn;
-    let mut shake = SHAKE256::new();
-    shake.inject(seed).unwrap();
-    shake.flip().unwrap();
-
-    let mut tmp_i8 = [0i8; TMP_I8_LEN];
-    let mut tmp_u16 = [0u16; TMP_U16_LEN];
-    let mut tmp_u32 = [0u32; TMP_U32_LEN];
-    let mut tmp_fxr = [FXR::ZERO; TMP_FXR_LEN];
-    let mut tmp_flr = [FLR::ZERO; TMP_FLR_LEN];
-    let (f, rest) = tmp_i8[..(2 * n)].split_at_mut(n);
-    let (g, _) = rest.split_at_mut(n);
-    let mut last = None;
-
-    for attempt in 1..=max_attempts {
-        poly_small_mkgauss(&mut shake, logn, f);
-        poly_small_mkgauss(&mut shake, logn, g);
-        let dbg = eval_pqclean_candidate(
-            logn,
-            f,
-            g,
-            &mut tmp_u16[..],
-            &mut tmp_u32[..],
-            &mut tmp_fxr[..],
-            &mut tmp_flr[..],
-        );
-        let solve_ok = dbg.solve_ok;
-        last = Some(dbg);
-        if solve_ok {
-            return (attempt, last);
-        }
-    }
-
-    (max_attempts, last)
-}
-
-#[cfg(test)]
-pub(crate) fn debug_trace_for_seed(
-    logn: u32,
-    seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
-    max_attempts: usize,
-) -> alloc::vec::Vec<PqcleanCandidateDebug> {
-    let n = 1usize << logn;
-    let mut shake = SHAKE256::new();
-    shake.inject(seed).unwrap();
-    shake.flip().unwrap();
-
-    let mut tmp_i8 = [0i8; TMP_I8_LEN];
-    let mut tmp_u16 = [0u16; TMP_U16_LEN];
-    let mut tmp_u32 = [0u32; TMP_U32_LEN];
-    let mut tmp_fxr = [FXR::ZERO; TMP_FXR_LEN];
-    let mut tmp_flr = [FLR::ZERO; TMP_FLR_LEN];
-    let (f, rest) = tmp_i8.split_at_mut(n);
-    let (g, _) = rest.split_at_mut(n);
-    let mut out = alloc::vec::Vec::with_capacity(max_attempts);
-
-    for _ in 0..max_attempts {
-        poly_small_mkgauss(&mut shake, logn, f);
-        poly_small_mkgauss(&mut shake, logn, g);
-        let dbg = eval_pqclean_candidate(
-            logn,
-            f,
-            g,
-            &mut tmp_u16,
-            &mut tmp_u32,
-            &mut tmp_fxr,
-            &mut tmp_flr,
-        );
-        let solved = dbg.solve_ok;
-        out.push(dbg);
-        if solved {
-            break;
-        }
-    }
-    out
 }
 
 pub(crate) fn keygen_pqclean(
