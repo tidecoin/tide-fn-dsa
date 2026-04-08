@@ -46,8 +46,14 @@
 //! portable emulation of floating-point operations is used (this
 //! emulation makes a best effort at operating in constant-time, though
 //! some recent compiler optimizations might introduce variable-time
-//! operations). Key pair generation and signature verification do not
-//! use floating-point operations at all.
+//! operations).
+//!
+//! Numeric behavior differs by subsystem:
+//!
+//!  - classic/native key generation uses integer and fixed-point arithmetic
+//!  - PQClean/Tidecoin deterministic key generation uses an integer-only
+//!    emulation of Falcon FLR/FFT semantics
+//!  - signature verification uses integer arithmetic
 //!
 //! The key pair generation implementation is a translation of the
 //! [ntrugen] code, which is faster than the originally submitted Falcon
@@ -70,6 +76,10 @@
 //!
 //! These APIs are intentionally separate because the same 48-byte seed
 //! does not map to the same Falcon key pair in the two families.
+//! The PQClean/Tidecoin APIs are compatibility-oriented deterministic
+//! key-derivation entrypoints; they preserve the original seeded Falcon
+//! mapping and rejection behavior, but they do not imply that PQClean code
+//! is used for signing or verification.
 //!
 //! ```no_run
 //! use tide_fn_dsa::{

@@ -51,12 +51,22 @@
 //!
 //!  - `keygen_from_seed_native()` uses the upstream `fn-dsa` / `ntrugen`
 //!    seeded key-generation path.
-//!  - `keygen_from_seed_pqclean()` and `keygen_from_stream_key_tidecoin()`
-//!    use PQClean/Tidecoin-compatible Falcon seeded key generation.
+//!  - `keygen_from_seed_pqclean()` takes a 48-byte Falcon seed and
+//!    reproduces the original Falcon / PQClean deterministic seeded
+//!    key-generation mapping for supported Falcon sizes.
+//!  - `keygen_from_stream_key_tidecoin()` takes a 64-byte Tidecoin PQHD
+//!    stream key, derives 48-byte Falcon seeds with the Tidecoin retry
+//!    schedule, then runs the PQClean-compatible Falcon deterministic
+//!    key-generation path.
 //!
 //! These APIs are intentionally distinct because the upstream `fn-dsa`
 //! seeded Falcon path does not map a seed to the same key pair as the
 //! original Falcon/PQClean/Tidecoin seeded path.
+//!
+//! The PQClean/Tidecoin APIs are compatibility-oriented deterministic
+//! key-derivation entrypoints. They preserve the original seeded Falcon
+//! mapping and rejection behavior; they do not imply that a separate
+//! PQClean runtime is used for signing or verification.
 //!
 //! ## WARNING
 //!
@@ -117,9 +127,25 @@ mod gauss;
 mod mp31;
 mod ntru;
 mod pqclean_compat;
+mod pqclean_flr;
+mod pqclean_float;
+mod pqclean_ntru;
+mod pqclean_poly;
+#[cfg(all(test, feature = "pqclean-ref"))]
+mod pqclean_ref;
+#[cfg(all(test, feature = "pqclean-ref"))]
+mod pqclean_parity_tests;
+#[cfg(all(test, not(feature = "shake256x4")))]
+mod pqclean_test_shims;
 mod poly;
 mod vect;
 mod zint31;
+
+#[cfg(test)]
+mod flr {
+    #[allow(unused_imports)]
+    pub(crate) use crate::pqclean_float::FLR;
+}
 
 #[cfg(all(not(feature = "no_avx2"),
     any(target_arch = "x86_64", target_arch = "x86")))]
@@ -451,13 +477,18 @@ macro_rules! deterministic_falcon_impl {
                 result
             }
 
-            /// Generate a deterministic Falcon key pair from a 48-byte seed
-            /// with PQClean/Tidecoin-compatible Falcon output.
+            /// Generate a deterministic Falcon key pair from a 48-byte Falcon
+            /// seed with PQClean-compatible output.
+            ///
+            /// For supported Falcon sizes (`logn = 9` or `10`), this API
+            /// reproduces the original Falcon / PQClean deterministic seeded
+            /// key-generation mapping for the provided 48-byte seed.
             ///
             /// This compatibility API always uses the original Falcon/PQClean
-            /// scalar SHAKE256 seed expansion and Gaussian sampler so that a
-            /// given seed maps to the same Falcon key pair as in
-            /// PQClean/Tidecoin deterministic key generation.
+            /// scalar SHAKE256 seed expansion and Gaussian sampler, not the
+            /// upstream `fn-dsa` seeded path. It is intended to reproduce the
+            /// original deterministic mapping for interoperability, including
+            /// the same seeded rejection behavior.
             pub fn keygen_from_seed_pqclean(
                 &mut self,
                 logn: u32,
@@ -485,11 +516,13 @@ macro_rules! deterministic_falcon_impl {
             /// Generate a deterministic Falcon key pair from a 64-byte PQHD
             /// stream key using the Tidecoin node retry schedule.
             ///
-            /// This compatibility API derives 48-byte Falcon seeds from the
-            /// provided 64-byte stream key with the same HMAC-SHA512
-            /// stream-block KDF and counter-based retry schedule as the
-            /// Tidecoin node, then uses the PQClean-compatible Falcon seeded
-            /// key-generation path.
+            /// This compatibility API takes a 64-byte Tidecoin PQHD stream
+            /// key, derives 48-byte Falcon seeds from it with the same
+            /// HMAC-SHA512 stream-block KDF and counter-based retry schedule
+            /// as the Tidecoin node, then runs the PQClean-compatible Falcon
+            /// deterministic seeded key-generation path on each derived seed.
+            /// It is intended to reproduce the Tidecoin deterministic mapping,
+            /// including the same retry schedule over derived Falcon seeds.
             pub fn keygen_from_stream_key_tidecoin(
                 &mut self,
                 logn: u32,
@@ -889,6 +922,13 @@ mod tests {
 
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[cfg(feature = "shake256x4")]
+    pub(crate) use shake::SHAKE256x4;
+
+    #[cfg(not(feature = "shake256x4"))]
+    #[allow(unused_imports)]
+    pub(crate) use crate::pqclean_test_shims::SHAKE256x4;
 
     // For degrees 256, 512, and 1024, 100 key pairs have been generated
     // with falcon.py from ntrugen; this implementation is supposed to be

@@ -12,7 +12,7 @@ published yet, and therefore what is implemented here is *not* the
 "real" FN-DSA; such a thing does not exist yet. When FN-DSA gets
 published (presumably as a draft first, but ultimately as a "final"
 standard), this implementation will be adjusted accordingly.
-Correspondingly, it is expected that **backward compatiblity will NOT be
+Correspondingly, it is expected that **backward compatibility will NOT be
 maintained**, i.e. that keys and signatures obtained with this code may
 cease to be accepted by ulterior versions. Only version 1.0 will provide
 such stability, and it will be published only after publication of the
@@ -25,14 +25,9 @@ This fork also adds explicit compatibility support for:
   - Tidecoin PQHD deterministic Falcon key derivation
 
 Cargo package names in this fork are `tide-fn-dsa*`. The Rust crate ids
-are `tide_fn_dsa*`, matching the Tidecoin package identity:
+are `tide_fn_dsa*`, matching the Tidecoin package identity.
 
-```toml
-[dependencies]
-tide-fn-dsa = { git = "https://github.com/tidecoin/tide-fn-dsa" }
-```
-
-If you want only the umbrella package, use:
+If you want the umbrella package, use:
 
 ```toml
 [dependencies]
@@ -86,14 +81,23 @@ signature without changing its mathematical value.
 
 ## Optimizations, Platforms and Features
 
-The base implementation uses only integer computations, which are
-presumed safe, and constant-time to the extent that such things are
-possible (this should be considered a "best-effort" implementation,
-since recent LLVM versions have become pretty good at inferring that
-values are really Booleans in digsuise, and of course the same could
-apply to any JIT compilation layer, either hidden in-silicon, or as part
-of a virtual machine implementation, e.g. is using WASM). On some
-architectures, some optimizations are applied:
+The codebase is pure Rust and aims at constant-time behavior to the
+extent realistically achievable for Falcon-family algorithms. This
+should still be understood as a best-effort implementation, since recent
+LLVM versions have become pretty good at inferring that values are
+really Booleans in disguise, and the same caveat can apply to JIT or VM
+execution environments such as WASM.
+
+Numeric behavior differs by subsystem:
+
+  - classic/native key generation uses integer and fixed-point arithmetic
+  - PQClean/Tidecoin deterministic key generation uses a local
+    integer-only Falcon-compatible FLR/FFT layer
+  - signature generation may use native floating-point on some
+    architectures for performance
+  - signature verification uses integer arithmetic
+
+On some architectures, some optimizations are applied:
 
   - **x86 and x86_64:** if SSE2 support is detected at compile-time,
     then SSE2 opcodes are used for floating-point computations in
@@ -137,11 +141,13 @@ features can be enabled directly on that crate:
     floating-point divisions. This feature was included because some
     RISC-V cores, in particular the SiFive U74, have constant-time
     additions and multiplications, but division cost varies depending on
-    the input operands.
+    the input operands. On non-`riscv64` targets this feature has no
+    effect.
 
   - `sqrt_emu`: this is similar to `div_emu` but for the square root
     operation. On the SiFive U74, enabling both `div_emu` and `sqrt_emu`
-    increases the cost of signature generation by about 25%.
+    increases the cost of signature generation by about 25%. On
+    non-`riscv64` targets this feature has no effect.
 
   - `small_context`: reduce the in-memory size of the signature generator
     context (`SigningKey` instance); for the largest degree (n = 1024),
@@ -153,8 +159,8 @@ Of these options, only `no_avx2` has any impact on verifying.
 ## Performance
 
 This implementation achieves performance similar to that obtained with C
-code. The key pair generation code is a translation of the
-[ntrugen](https://github.com/pornin/ntrugen) implementation. On x86
+code. The classic/native key pair generation code is a translation of
+the [ntrugen](https://github.com/pornin/ntrugen) implementation. On x86
 CPUs, AVX2 opcodes are used for better performance if the CPU is
 detected to support them (the non-AVX2 code is still included, so that
 the compiled binaries can still run correctly on non-AVX2 CPUs). On
@@ -163,8 +169,19 @@ native floating-point type (`f64`) is used in signature generation,
 because on such platforms the type maps to the hardware support which
 follows the correct strict IEEE-754 rounding rules; on other platforms
 (including 32-bit x86 and 32-bit ARM), an integer-only implementation is
-used, which emulates the expected IEEE-754 primitives. Key pair
-generation and signature verification use only integer operations.
+used, which emulates the expected IEEE-754 primitives.
+
+Both key-generation families are integer-only in implementation:
+
+  - the classic/native `fn-dsa` / `ntrugen` key-generation path uses its
+    existing integer/fixed-point machinery
+  - the PQClean/Tidecoin compatibility key-generation path uses a local
+    integer-only Falcon-compatible FLR/FFT layer
+
+Signature verification also uses integer operations only.
+
+The performance figures below describe the classic/native key-generation
+path and the standard signing/verifying paths.
 
 On an Intel i5-8259U ("Coffee Lake", a Skylake variant), the following
 performance is achieved (in clock cycles):
@@ -178,7 +195,7 @@ performance is achieved (in clock cycles):
 
 `+sign` means generating a new signature on a new message but with the
 same signing key; this allows reusing some computations that depend on
-the key but not on the message. Similary, `+verify` is for verifying
+the key but not on the message. Similarly, `+verify` is for verifying
 additional signatures relatively to the same key. We may note that
 this is about as fast as RSA-2048 for verification, but about 2.5x
 faster for signature generation, and many times faster for key pair
@@ -367,16 +384,22 @@ explicitly:
 
   - `keygen_from_seed_native()` uses the upstream `fn-dsa` / `ntrugen`
     seeded Falcon path.
-  - `keygen_from_seed_pqclean()` uses the original
-    PQClean-compatible seeded Falcon path.
-  - `keygen_from_stream_key_tidecoin()` derives Falcon seeds from a
-    64-byte Tidecoin PQHD stream key and then uses the PQClean/Tidecoin
-    compatibility path.
+  - `keygen_from_seed_pqclean()` takes a 48-byte Falcon seed and
+    reproduces the original Falcon / PQClean deterministic seeded
+    mapping.
+  - `keygen_from_stream_key_tidecoin()` takes a 64-byte Tidecoin PQHD
+    stream key, derives 48-byte Falcon seeds with the Tidecoin retry
+    schedule, then uses the PQClean/Tidecoin compatibility path.
 
 This split is intentional: the same 48-byte Falcon seed does not
 generally produce the same key pair under the upstream `fn-dsa` seeded
 key generator and the original Falcon/PQClean/Tidecoin seeded key
 generator.
+
+The PQClean/Tidecoin APIs are compatibility-oriented deterministic
+key-derivation entrypoints. They preserve the original seeded Falcon
+mapping and rejection behavior, but they do not imply that PQClean code
+is used for signing or verification.
 
 Compatibility-oriented examples:
 
