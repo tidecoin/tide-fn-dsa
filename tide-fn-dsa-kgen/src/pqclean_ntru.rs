@@ -4,13 +4,14 @@
 extern crate alloc;
 
 use alloc::vec;
+use zeroize::Zeroizing;
 
 use super::mp31::*;
 use super::poly::*;
 use super::pqclean_float::{
-    flr_to_f64, iFFT, poly_add, poly_add_muladj_fft, poly_adj_fft, poly_div_autoadj_fft,
-    poly_invnorm2_fft, poly_mul_autoadj_fft, poly_mul_fft, poly_mul_selfadj_fft, poly_sub, FFT,
-    FLR,
+    flr_in_open_i32_range, flr_in_open_i64_range, iFFT, poly_add, poly_add_muladj_fft, poly_adj_fft,
+    poly_div_autoadj_fft, poly_invnorm2_fft, poly_mul_autoadj_fft, poly_mul_fft,
+    poly_mul_selfadj_fft, poly_sub, FFT, FLR,
 };
 use super::zint31::*;
 
@@ -302,7 +303,7 @@ fn make_fg_intermediate(logn_top: u32, f: &[i8], g: &[i8], depth: u32, work: &mu
     make_fg_exact(work, f, g, logn_top, depth, true);
 
     let fg_len = 2 * n * slen;
-    let mut transposed = vec![0u32; fg_len];
+    let mut transposed = Zeroizing::new(vec![0u32; fg_len]);
     let (src_f, src_g) = work[..fg_len].split_at(n * slen);
     let (dst_f, dst_g) = transposed.split_at_mut(n * slen);
     for coeff in 0..n {
@@ -355,7 +356,9 @@ fn solve_NTRU_deepest(logn: u32, f: &[i8], g: &[i8], tmp: &mut [u32]) -> bool {
     if zint_bezout(cap_g, cap_f, fp, gp, t1) != 0xFFFFFFFF {
         return false;
     }
-    if zint_mul_small(cap_f, Q) != 0 || zint_mul_small(cap_g, Q) != 0 {
+    let cf_over = (zint_mul_small(cap_f, Q) != 0) as u32;
+    let cg_over = (zint_mul_small(cap_g, Q) != 0) as u32;
+    if (cf_over | cg_over) != 0 {
         return false;
     }
     fg[..slen].copy_from_slice(cap_f);
@@ -531,8 +534,7 @@ fn solve_NTRU_intermediate(
             let k_base = 2 * (llen + slen) * n;
             for u in 0..n {
                 let xv = rt2[u] * pdc;
-                let xf = flr_to_f64(xv);
-                if xf <= -2147483647.0 || xf >= 2147483647.0 {
+                if !flr_in_open_i32_range(xv) {
                     return false;
                 }
                 tmp_u32[k_base + u] = xv.rint() as i32 as u32;
@@ -610,8 +612,8 @@ fn solve_NTRU_binary_depth1(logn_top: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u3
     let dlen = MAX_BL_SMALL[(depth + 1) as usize];
     let llen = MAX_BL_LARGE[depth as usize];
 
-    let mut Fd = vec![0u32; dlen * hn];
-    let mut Gd = vec![0u32; dlen * hn];
+    let mut Fd = Zeroizing::new(vec![0u32; dlen * hn]);
+    let mut Gd = Zeroizing::new(vec![0u32; dlen * hn]);
     for v in 0..hn {
         for u in 0..dlen {
             Fd[v * dlen + u] = tmp_u32[u * hn + v];
@@ -619,15 +621,15 @@ fn solve_NTRU_binary_depth1(logn_top: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u3
         }
     }
 
-    let mut FGt = vec![0u32; 2 * llen * n];
+    let mut FGt = Zeroizing::new(vec![0u32; 2 * llen * n]);
     let (Ft, Gt) = FGt.split_at_mut(llen * n);
-    let mut gm = vec![0u32; n_top];
-    let mut igm = vec![0u32; n_top];
-    let mut fx = vec![0u32; n_top];
-    let mut gx = vec![0u32; n_top];
-    let mut Fp = vec![0u32; hn];
-    let mut Gp = vec![0u32; hn];
-    let mut tmp_crt = vec![0u32; llen.max(slen)];
+    let mut gm = Zeroizing::new(vec![0u32; n_top]);
+    let mut igm = Zeroizing::new(vec![0u32; n_top]);
+    let mut fx = Zeroizing::new(vec![0u32; n_top]);
+    let mut gx = Zeroizing::new(vec![0u32; n_top]);
+    let mut Fp = Zeroizing::new(vec![0u32; hn]);
+    let mut Gp = Zeroizing::new(vec![0u32; hn]);
+    let mut tmp_crt = Zeroizing::new(vec![0u32; llen.max(slen)]);
 
     for u in 0..llen {
         let p = PRIMES[u].p;
@@ -691,7 +693,7 @@ fn solve_NTRU_binary_depth1(logn_top: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u3
     }
 
     {
-        let mut combined_fg = vec![0u32; llen * (n << 1)];
+        let mut combined_fg = Zeroizing::new(vec![0u32; llen * (n << 1)]);
         for u in 0..llen {
             for v in 0..n {
                 combined_fg[v * llen + u] = Ft[v * llen + u];
@@ -714,20 +716,20 @@ fn solve_NTRU_binary_depth1(logn_top: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u3
         }
     }
 
-    let mut fg_plain = vec![0u32; 7 * n_top];
+    let mut fg_plain = Zeroizing::new(vec![0u32; 7 * n_top]);
     make_fg_exact(&mut fg_plain, f, g, logn_top, 1, false);
     let (ft, rest) = fg_plain.split_at_mut(n);
     let (gt, _) = rest.split_at_mut(n);
     zint_rebuild_CRT_stride(ft, slen, slen, n, true, &mut tmp_crt[..slen]);
     zint_rebuild_CRT_stride(gt, slen, slen, n, true, &mut tmp_crt[..slen]);
 
-    let mut cap_f = vec![FLR::ZERO; n];
-    let mut cap_g = vec![FLR::ZERO; n];
+    let mut cap_f = Zeroizing::new(vec![FLR::ZERO; n]);
+    let mut cap_g = Zeroizing::new(vec![FLR::ZERO; n]);
     poly_big_to_flr_coeff_major(&mut cap_f, Ft, llen, llen, logn);
     poly_big_to_flr_coeff_major(&mut cap_g, Gt, llen, llen, logn);
 
-    let mut flr_f = vec![FLR::ZERO; n];
-    let mut flr_g = vec![FLR::ZERO; n];
+    let mut flr_f = Zeroizing::new(vec![FLR::ZERO; n]);
+    let mut flr_g = Zeroizing::new(vec![FLR::ZERO; n]);
     poly_big_to_flr_coeff_major(&mut flr_f, &ft, slen, slen, logn);
     poly_big_to_flr_coeff_major(&mut flr_g, &gt, slen, slen, logn);
 
@@ -736,23 +738,22 @@ fn solve_NTRU_binary_depth1(logn_top: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u3
     FFT(logn, &mut flr_f);
     FFT(logn, &mut flr_g);
 
-    let mut num = vec![FLR::ZERO; n];
-    let mut den = vec![FLR::ZERO; n];
+    let mut num = Zeroizing::new(vec![FLR::ZERO; n]);
+    let mut den = Zeroizing::new(vec![FLR::ZERO; n]);
     poly_add_muladj_fft(logn, &mut num, &cap_f, &cap_g, &flr_f, &flr_g);
     poly_invnorm2_fft(logn, &mut den[..(n >> 1)], &flr_f, &flr_g);
     poly_mul_autoadj_fft(logn, &mut num, &den[..(n >> 1)]);
     iFFT(logn, &mut num);
     for u in 0..n {
-        let z = flr_to_f64(num[u]);
-        if !(z > -(i64::MAX as f64) && z < (i64::MAX as f64)) {
+        if !flr_in_open_i64_range(num[u]) {
             return false;
         }
         num[u] = FLR::from_i64(num[u].rint());
     }
     FFT(logn, &mut num);
 
-    let mut kf = flr_f.clone();
-    let mut kg = flr_g.clone();
+    let mut kf = Zeroizing::new(flr_f.clone());
+    let mut kg = Zeroizing::new(flr_g.clone());
     poly_mul_fft(logn, &mut kf, &num);
     poly_mul_fft(logn, &mut kg, &num);
     poly_sub(logn, &mut cap_f, &kf);
@@ -856,8 +857,8 @@ fn solve_NTRU_binary_depth0(logn: u32, f: &[i8], g: &[i8], tmp_u32: &mut [u32]) 
         t2[u] = mp_norm(t3[u], p) as u32;
     }
 
-    let mut rt2 = vec![FLR::ZERO; hn];
-    let mut rt3 = vec![FLR::ZERO; n];
+    let mut rt2 = Zeroizing::new(vec![FLR::ZERO; hn]);
+    let mut rt3 = Zeroizing::new(vec![FLR::ZERO; n]);
     for u in 0..n {
         rt3[u] = FLR::from_i32(t2[u] as i32);
     }
@@ -925,7 +926,9 @@ pub(crate) fn solve_NTRU(
     for i in 0..n {
         let zf = zint_one_to_plain(&tmp_u32[i..]);
         let zg = zint_one_to_plain(&tmp_u32[i + n..]);
-        if !(-127..=127).contains(&zf) || !(-127..=127).contains(&zg) {
+        let bad_f = !(-127..=127).contains(&zf);
+        let bad_g = !(-127..=127).contains(&zg);
+        if bad_f | bad_g {
             return false;
         }
         cap_f[i] = zf as i8;

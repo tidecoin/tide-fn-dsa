@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::fxp::FXR;
 use crate::ntru;
 use crate::pqclean_float::{
-    flr_to_f64, iFFT, poly_adj_fft, poly_invnorm2_fft, poly_mul_autoadj_fft, poly_mulconst,
+    flr_lt, iFFT, poly_adj_fft, poly_invnorm2_fft, poly_mul_autoadj_fft, poly_mulconst,
     poly_set_small, FFT, FLR,
 };
 use crate::pqclean_ntru;
@@ -124,7 +124,11 @@ fn coeffs_within_bound(f: &[i8], g: &[i8], bound: i32) -> bool {
     for i in 0..f.len() {
         let xf = f[i] as i32;
         let xg = g[i] as i32;
-        reject |= ((xf >= bound || xf <= -bound) as u32) | ((xg >= bound || xg <= -bound) as u32);
+        let xf_hi = (xf >= bound) as u32;
+        let xf_lo = (xf <= -bound) as u32;
+        let xg_hi = (xg >= bound) as u32;
+        let xg_lo = (xg <= -bound) as u32;
+        reject |= xf_hi | xf_lo | xg_hi | xg_lo;
     }
     reject == 0
 }
@@ -164,7 +168,7 @@ fn check_ortho_norm_pqclean(logn: u32, f: &[i8], g: &[i8], tmp: &mut [FLR]) -> b
         bnorm += rt1[u].square() + rt2[u].square();
     }
     let bnorm_max = FLR::decode(&4670353323383631276u64.to_le_bytes()).unwrap();
-    flr_to_f64(bnorm) < flr_to_f64(bnorm_max)
+    flr_lt(bnorm, bnorm_max)
 }
 
 fn encode_pqclean_keypair(

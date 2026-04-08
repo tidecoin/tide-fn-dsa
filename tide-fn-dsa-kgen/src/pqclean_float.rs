@@ -12,6 +12,35 @@ pub(crate) use flr::FLR;
 pub(crate) use poly::{iFFT, poly_add, poly_mul_fft, poly_sub, FFT};
 
 #[inline(always)]
+pub(crate) fn flr_lt(x: FLR, y: FLR) -> bool {
+    flr_ordered_bits(x) < flr_ordered_bits(y)
+}
+
+#[inline(always)]
+pub(crate) fn flr_in_open_i64_range(x: FLR) -> bool {
+    let xb = flr_ordered_bits(x);
+    let lo = flr_ordered_bits(FLR::from_i64(-i64::MAX));
+    let hi = flr_ordered_bits(FLR::from_i64(i64::MAX));
+    (xb > lo) & (xb < hi)
+}
+
+#[inline(always)]
+pub(crate) fn flr_in_open_i32_range(x: FLR) -> bool {
+    let xb = flr_ordered_bits(x);
+    let lo = flr_ordered_bits(FLR::from_i64(-(i32::MAX as i64)));
+    let hi = flr_ordered_bits(FLR::from_i64(i32::MAX as i64));
+    (xb > lo) & (xb < hi)
+}
+
+#[inline(always)]
+fn flr_ordered_bits(x: FLR) -> u64 {
+    let bits = u64::from_le_bytes(x.encode());
+    let sign = bits >> 63;
+    let mask = 0u64.wrapping_sub(sign) | 0x8000000000000000;
+    bits ^ mask
+}
+
+#[inline(always)]
 fn flc_mul(x_re: FLR, x_im: FLR, y_re: FLR, y_im: FLR) -> (FLR, FLR) {
     (x_re * y_re - x_im * y_im, x_re * y_im + x_im * y_re)
 }
@@ -81,10 +110,6 @@ pub(crate) fn poly_div_autoadj_fft(logn: u32, a: &mut [FLR], b: &[FLR]) {
     poly_div_selfadj_fft(logn, a, b);
 }
 
-#[inline(always)]
-pub(crate) fn flr_to_f64(x: FLR) -> f64 {
-    f64::from_le_bytes(x.encode())
-}
 
 #[inline(always)]
 pub(crate) fn poly_set_small(logn: u32, d: &mut [FLR], f: &[i8]) {

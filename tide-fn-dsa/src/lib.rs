@@ -70,6 +70,10 @@
 //!
 //! These APIs are intentionally separate because the same 48-byte seed
 //! does not map to the same Falcon key pair in the two families.
+//! The PQClean/Tidecoin APIs are compatibility-oriented deterministic
+//! key-derivation entrypoints; they preserve the original seeded Falcon
+//! mapping and rejection behavior, but they do not imply that PQClean code
+//! is used for signing or verification.
 //!
 //! ```no_run
 //! use tide_fn_dsa::{

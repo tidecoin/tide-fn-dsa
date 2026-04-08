@@ -17,7 +17,7 @@ What is true now relative to baseline `89ef9ad`:
 - all classic `tide-fn-dsa-kgen` core files are back to baseline
 - all classic `tide-fn-dsa-sign` shared files are back to baseline
 - the only classic-path file intentionally still different is `tide-fn-dsa-sign/src/flr_native.rs`
-- the remaining non-baseline code is confined to PQClean-specific modules and small bridge wiring in `tide-fn-dsa-kgen/src/lib.rs`
+- the remaining non-baseline code is confined to PQClean-specific modules, small bridge wiring in `tide-fn-dsa-kgen/src/lib.rs`, and top-level documentation updates in `tide-fn-dsa/src/lib.rs`
 
 ## Rolled Back
 
@@ -87,6 +87,7 @@ Cleanup done in that layer:
 - isolated sign-path imports used by PQClean float code so default workspace clippy is clean
 - localized the PQClean reference debug type inside `pqclean_ref.rs` instead of exposing it through the classic crate root
 - marked the remaining PQClean reference/debug files as explicitly test/reference-only so `clippy` and test-target checks stay clean without leaking that surface into classic code
+- later PQClean-only hardening passes stayed confined to `pqclean_compat.rs`, `pqclean_float.rs`, `pqclean_ntru.rs`, and documentation files; they did not reintroduce changes to classic FN-DSA core files
 
 ## Clippy Status
 
@@ -131,7 +132,8 @@ After the rollback, the intended non-baseline files are:
 
 - `Cargo.toml`
 - `README.md`
-- `pqclean-parity.md`
+- `docs/pqclean-parity.md`
+- `docs/pqclean-security-plan.md`
 - `tide-fn-dsa-kgen/Cargo.toml`
 - `tide-fn-dsa-kgen/build.rs`
 - `tide-fn-dsa-kgen/src/lib.rs`
@@ -142,6 +144,7 @@ After the rollback, the intended non-baseline files are:
 - `tide-fn-dsa-kgen/src/pqclean_ref.rs`
 - `tide-fn-dsa-kgen/tests/pqclean_ref/...`
 - `tide-fn-dsa-sign/src/flr_native.rs`
+- `tide-fn-dsa/src/lib.rs`
 
 That is the correct remaining shape:
 
@@ -163,6 +166,7 @@ Current status is:
 
 - classic FN-DSA core restored
 - PQClean logic isolated
+- later PQClean hardening remained isolated to PQClean files
 - workspace clippy clean
 - classic keygen tests fast and passing
 - remaining `SHAKE256x4` shim moved out of `lib.rs` implementation scope

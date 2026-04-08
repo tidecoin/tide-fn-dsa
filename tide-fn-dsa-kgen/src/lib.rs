@@ -63,6 +63,11 @@
 //! seeded Falcon path does not map a seed to the same key pair as the
 //! original Falcon/PQClean/Tidecoin seeded path.
 //!
+//! The PQClean/Tidecoin APIs are compatibility-oriented deterministic
+//! key-derivation entrypoints. They preserve the original seeded Falcon
+//! mapping and rejection behavior; they do not imply that a separate
+//! PQClean runtime is used for signing or verification.
+//!
 //! ## WARNING
 //!
 //! **The FN-DSA standard is currently being drafted, but no version has
@@ -478,7 +483,9 @@ macro_rules! deterministic_falcon_impl {
             ///
             /// This compatibility API always uses the original Falcon/PQClean
             /// scalar SHAKE256 seed expansion and Gaussian sampler, not the
-            /// upstream `fn-dsa` seeded path.
+            /// upstream `fn-dsa` seeded path. It is intended to reproduce the
+            /// original deterministic mapping for interoperability, including
+            /// the same seeded rejection behavior.
             pub fn keygen_from_seed_pqclean(
                 &mut self,
                 logn: u32,
@@ -511,6 +518,8 @@ macro_rules! deterministic_falcon_impl {
             /// HMAC-SHA512 stream-block KDF and counter-based retry schedule
             /// as the Tidecoin node, then runs the PQClean-compatible Falcon
             /// deterministic seeded key-generation path on each derived seed.
+            /// It is intended to reproduce the Tidecoin deterministic mapping,
+            /// including the same retry schedule over derived Falcon seeds.
             pub fn keygen_from_stream_key_tidecoin(
                 &mut self,
                 logn: u32,
