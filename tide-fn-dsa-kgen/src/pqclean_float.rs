@@ -1,15 +1,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-#[allow(dead_code)]
-#[path = "../../tide-fn-dsa-sign/src/flr.rs"]
-mod flr;
-#[allow(dead_code, clippy::excessive_precision)]
-#[path = "../../tide-fn-dsa-sign/src/poly.rs"]
-mod poly;
-
-pub(crate) use flr::FLR;
-pub(crate) use poly::{iFFT, poly_add, poly_mul_fft, poly_sub, FFT};
+pub(crate) use crate::pqclean_flr::FLR;
+pub(crate) use crate::pqclean_poly::{iFFT, poly_add, poly_mul_fft, poly_sub, FFT};
 
 #[inline(always)]
 pub(crate) fn flr_lt(x: FLR, y: FLR) -> bool {

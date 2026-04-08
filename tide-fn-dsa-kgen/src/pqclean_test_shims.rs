@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use tide_fn_dsa_comm::shake;
 
 #[derive(Copy, Clone, Debug)]

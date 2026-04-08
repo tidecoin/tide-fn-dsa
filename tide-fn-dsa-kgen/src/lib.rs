@@ -127,8 +127,10 @@ mod gauss;
 mod mp31;
 mod ntru;
 mod pqclean_compat;
+mod pqclean_flr;
 mod pqclean_float;
 mod pqclean_ntru;
+mod pqclean_poly;
 #[cfg(all(test, feature = "pqclean-ref"))]
 mod pqclean_ref;
 #[cfg(all(test, feature = "pqclean-ref"))]
@@ -141,6 +143,7 @@ mod zint31;
 
 #[cfg(test)]
 mod flr {
+    #[allow(unused_imports)]
     pub(crate) use crate::pqclean_float::FLR;
 }
 
@@ -924,6 +927,7 @@ mod tests {
     pub(crate) use shake::SHAKE256x4;
 
     #[cfg(not(feature = "shake256x4"))]
+    #[allow(unused_imports)]
     pub(crate) use crate::pqclean_test_shims::SHAKE256x4;
 
     // For degrees 256, 512, and 1024, 100 key pairs have been generated
