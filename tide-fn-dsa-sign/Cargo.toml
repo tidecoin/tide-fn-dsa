@@ -15,7 +15,7 @@ rust-version.workspace = true
 name = "tide_fn_dsa_sign"
 
 [dependencies]
-tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm" }
+tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm", default-features = false }
 zeroize.workspace = true
 
 [dev-dependencies]
@@ -24,7 +24,7 @@ hex.workspace = true
 [features]
 default = []
 small_context = []
-no_avx2 = []
+no_avx2 = ["tide-fn-dsa-comm/no_avx2"]
 div_emu = []
 sqrt_emu = []
-shake256x4 = []
+shake256x4 = ["tide-fn-dsa-comm/shake256x4"]

@@ -15,7 +15,7 @@ rust-version.workspace = true
 name = "tide_fn_dsa_kgen"
 
 [dependencies]
-tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm" }
+tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm", default-features = false }
 sha2.workspace = true
 zeroize.workspace = true
 
@@ -29,8 +29,8 @@ cc = "1"
 
 [features]
 default = []
-no_avx2 = []
+no_avx2 = ["tide-fn-dsa-comm/no_avx2"]
 pqclean-ref = []
-shake256x4 = []
+shake256x4 = ["tide-fn-dsa-comm/shake256x4"]
 div_emu = []
 sqrt_emu = []

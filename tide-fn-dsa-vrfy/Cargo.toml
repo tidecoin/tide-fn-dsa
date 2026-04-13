@@ -15,11 +15,11 @@ rust-version.workspace = true
 name = "tide_fn_dsa_vrfy"
 
 [dependencies]
-tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm" }
+tide-fn-dsa-comm = { version = "0.4", path = "../tide-fn-dsa-comm", default-features = false }
 
 [dev-dependencies]
 hex.workspace = true
 
 [features]
 default = []
-no_avx2 = []
+no_avx2 = ["tide-fn-dsa-comm/no_avx2"]
